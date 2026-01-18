@@ -12,7 +12,7 @@ from pxr import UsdGeom
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
-from isaaclab.assets import Articulation, ArticulationCfg
+from isaaclab.assets import Articulation, RigidObject, ArticulationCfg, RigidObjectCfg
 from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
@@ -22,9 +22,8 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.math import sample_uniform
 
-
 @configclass
-class FrankaCabinetEnvCfg(DirectRLEnvCfg):
+class FrankaTestEnvCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 8.3333  # 500 timesteps
     decimation = 2
@@ -147,6 +146,70 @@ class FrankaCabinetEnvCfg(DirectRLEnvCfg):
         ),
     )
 
+    # objects
+    # rotate around x rot=[0.7071, 0.7071, 0, 0]
+    # rotate around y rot=[0.7071, 0, 0.7071, 0]
+
+    ketchup = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/ketchup",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.3, 1, 0], rot=[0.7071, 0.7071, 0, 0]),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/ketchup/usd/ketchup.usd",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                articulation_enabled=False
+            )
+        ),
+    )
+
+    basket = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/basket",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[0, 1, 0], rot=[0, 0, 0, 1]),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/basket/usd/basket.usd",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                articulation_enabled=False
+            )
+        ),
+    )
+
+    cream_cheese = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/cream_cheese",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.2, 0.7, 0], rot=[0.7071, 0.7071, 0, 0]),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/cream_cheese/usd/cream_cheese.usd",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                articulation_enabled=False
+            )
+        ),
+    )
+
+    alphabet_soup = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/alphabet_soup",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[0, 0.5, 0], rot=[0.7071, 0.7071, 0, 0]),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/alphabet_soup/usd/alphabet_soup.usd",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                articulation_enabled=False
+            )
+        ),
+    )
+
+    tomato_sauce = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/tomato_sauce",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.2, 0.5, 0], rot=[0.7071, 0.7071, 0, 0]),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/tomato_sauce/usd/tomato_sauce.usd",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                articulation_enabled=False
+            )
+        ),
+    )
+
     action_scale = 7.5
     dof_velocity_scale = 0.1
 
@@ -158,7 +221,7 @@ class FrankaCabinetEnvCfg(DirectRLEnvCfg):
     finger_reward_scale = 2.0
 
 
-class FrankaCabinetEnv(DirectRLEnv):
+class FrankaTestEnv(DirectRLEnv):
     # pre-physics step calls
     #   |-- _pre_physics_step(action)
     #   |-- _apply_action()
@@ -168,9 +231,9 @@ class FrankaCabinetEnv(DirectRLEnv):
     #   |-- _reset_idx(env_ids)
     #   |-- _get_observations()
 
-    cfg: FrankaCabinetEnvCfg
+    cfg: FrankaTestEnvCfg
 
-    def __init__(self, cfg: FrankaCabinetEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: FrankaTestEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         def get_env_local_pose(env_pos: torch.Tensor, xformable: UsdGeom.Xformable, device: torch.device):
@@ -202,6 +265,19 @@ class FrankaCabinetEnv(DirectRLEnv):
         self.robot_dof_targets = torch.zeros((self.num_envs, self._robot.num_joints), device=self.device)
 
         stage = get_current_stage()
+        cream_cheese_pose = get_env_local_pose(
+            self.scene.env_origins[0],
+            UsdGeom.Xformable(stage.GetPrimAtPath("/World/envs/env_0/cream_cheese")),
+            self.device,
+        )
+        cream_cheese_grasp_pose = get_env_local_pose(
+            self.scene.env_origins[0],
+            UsdGeom.Xformable(stage.GetPrimAtPath("/World/envs/env_0/cream_cheese/grasp_pose")),
+            self.device,
+        )
+
+        print(cream_cheese_pose)   
+        print(cream_cheese_grasp_pose)     
         hand_pose = get_env_local_pose(
             self.scene.env_origins[0],
             UsdGeom.Xformable(stage.GetPrimAtPath("/World/envs/env_0/Robot/panda_link7")),
@@ -230,9 +306,24 @@ class FrankaCabinetEnv(DirectRLEnv):
         self.robot_local_grasp_pos = robot_local_pose_pos.repeat((self.num_envs, 1))
         self.robot_local_grasp_rot = robot_local_grasp_pose_rot.repeat((self.num_envs, 1))
 
+        # cabinet drawer
         drawer_local_grasp_pose = torch.tensor([0.3, 0.01, 0.0, 1.0, 0.0, 0.0, 0.0], device=self.device)
         self.drawer_local_grasp_pos = drawer_local_grasp_pose[0:3].repeat((self.num_envs, 1))
         self.drawer_local_grasp_rot = drawer_local_grasp_pose[3:7].repeat((self.num_envs, 1))
+
+        # ketchup
+        ketchup_local_grasp_pose = torch.tensor([0.3, 0.01, 0.0, 1.0, 0.0, 0.0, 0.0], device=self.device)
+        self.ketchup_local_grasp_pos = ketchup_local_grasp_pose[0:3].repeat((self.num_envs, 1))
+        self.ketchup_local_grasp_rot = ketchup_local_grasp_pose[3:7].repeat((self.num_envs, 1))
+
+        butter_local_grasp_pose = torch.tensor([0.3, 0.01, 0.0, 1.0, 0.0, 0.0, 0.0], device=self.device)
+        self.butter_local_grasp_pos = butter_local_grasp_pose[0:3].repeat((self.num_envs, 1))
+        self.butter_local_grasp_rot = butter_local_grasp_pose[3:7].repeat((self.num_envs, 1))
+
+        basket_local_put_in_pose = torch.tensor([0.3, 0.01, 0.0, 1.0, 0.0, 0.0, 0.0], device=self.device)
+        self.basket_local_put_in_pos = basket_local_put_in_pose[0:3].repeat((self.num_envs, 1))
+        self.basket_local_put_in_rot = basket_local_put_in_pose[3:7].repeat((self.num_envs, 1))
+
 
         self.gripper_forward_axis = torch.tensor([0, 0, 1], device=self.device, dtype=torch.float32).repeat(
             (self.num_envs, 1)
@@ -257,12 +348,35 @@ class FrankaCabinetEnv(DirectRLEnv):
         self.robot_grasp_pos = torch.zeros((self.num_envs, 3), device=self.device)
         self.drawer_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
         self.drawer_grasp_pos = torch.zeros((self.num_envs, 3), device=self.device)
+        # custom objects
+        self.ketchup_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
+        self.ketchup_grasp_pos = torch.zeros((self.num_envs, 3), device=self.device)
+
+        self.ketchup_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
+        self.ketchup_grasp_pos = torch.zeros((self.num_envs, 3), device=self.device)
+
+        self.basket_put_in_rot = torch.zeros((self.num_envs, 4), device=self.device)
+        self.basket_put_in_pos = torch.zeros((self.num_envs, 3), device=self.device)
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self._cabinet = Articulation(self.cfg.cabinet)
+        self._ketchup = RigidObject(self.cfg.ketchup)
+        self._cream_cheese = RigidObject(self.cfg.cream_cheese)
+        self._alphabet_soup = RigidObject(self.cfg.alphabet_soup)
+        self._tomato_sauce = RigidObject(self.cfg.tomato_sauce)
+        self._basket = RigidObject(self.cfg.basket)
+        # self._butter = RigidObject(self.cfg.butter)
+
         self.scene.articulations["robot"] = self._robot
         self.scene.articulations["cabinet"] = self._cabinet
+        self.scene.rigid_objects["ketchup"] = self._ketchup
+        self.scene.rigid_objects["cream_cheese"] = self._cream_cheese
+        self.scene.rigid_objects["alphabet_soup"] = self._alphabet_soup
+        self.scene.rigid_objects["tomato_sauce"] = self._tomato_sauce
+        self.scene.rigid_objects["basket"] = self._basket
+        # self.scene.rigid_objects["butter"] = self._butter
+
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
@@ -307,7 +421,9 @@ class FrankaCabinetEnv(DirectRLEnv):
 
     def _get_rewards(self) -> torch.Tensor:
         # Refresh the intermediate values after the physics steps
-
+        self._compute_intermediate_values()
+        robot_left_finger_pos = self._robot.data.body_pos_w[:, self.left_finger_link_idx]
+        robot_right_finger_pos = self._robot.data.body_pos_w[:, self.right_finger_link_idx]
 
         return self._compute_rewards(
             self.actions,
@@ -402,7 +518,6 @@ class FrankaCabinetEnv(DirectRLEnv):
         # # Write to simulation
         # self._cabinet.write_joint_state_to_sim(drawer_joints, drawer_vels, env_ids=env_ids)
 
-
         (
             self.robot_grasp_rot[env_ids],
             self.robot_grasp_pos[env_ids],
@@ -418,6 +533,9 @@ class FrankaCabinetEnv(DirectRLEnv):
             self.drawer_local_grasp_rot[env_ids],
             self.drawer_local_grasp_pos[env_ids],
         )
+
+
+
 
     def _compute_rewards(
         self,
@@ -518,3 +636,4 @@ class FrankaCabinetEnv(DirectRLEnv):
         )
 
         return global_franka_rot, global_franka_pos, global_drawer_rot, global_drawer_pos
+
