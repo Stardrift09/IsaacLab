@@ -51,3 +51,15 @@ gym.register(
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
     },
 )
+
+gym.register(
+    id="ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket-v0",
+    entry_point=f"{__name__}.replay_living_room_scene1_pick_up_the_alphabet_soup_and_put_it_in_the_basket:ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.replay_living_room_scene1_pick_up_the_alphabet_soup_and_put_it_in_the_basket:ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:FrankaTestPPORunnerCfg",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+    },
+)

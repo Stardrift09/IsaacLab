@@ -8,7 +8,7 @@ from __future__ import annotations
 import torch
 
 from isaacsim.core.utils.torch.transformations import tf_combine, tf_inverse, tf_vector
-from pxr import UsdGeom
+from pxr import UsdGeom, Usd
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -265,19 +265,7 @@ class FrankaTestEnv(DirectRLEnv):
         self.robot_dof_targets = torch.zeros((self.num_envs, self._robot.num_joints), device=self.device)
 
         stage = get_current_stage()
-        cream_cheese_pose = get_env_local_pose(
-            self.scene.env_origins[0],
-            UsdGeom.Xformable(stage.GetPrimAtPath("/World/envs/env_0/cream_cheese")),
-            self.device,
-        )
-        cream_cheese_grasp_pose = get_env_local_pose(
-            self.scene.env_origins[0],
-            UsdGeom.Xformable(stage.GetPrimAtPath("/World/envs/env_0/cream_cheese/grasp_pose")),
-            self.device,
-        )
 
-        print(cream_cheese_pose)   
-        print(cream_cheese_grasp_pose)     
         hand_pose = get_env_local_pose(
             self.scene.env_origins[0],
             UsdGeom.Xformable(stage.GetPrimAtPath("/World/envs/env_0/Robot/panda_link7")),

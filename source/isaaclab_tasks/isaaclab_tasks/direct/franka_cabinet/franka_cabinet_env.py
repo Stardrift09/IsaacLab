@@ -307,6 +307,9 @@ class FrankaCabinetEnv(DirectRLEnv):
 
     def _get_rewards(self) -> torch.Tensor:
         # Refresh the intermediate values after the physics steps
+        self._compute_intermediate_values()
+        robot_left_finger_pos = self._robot.data.body_pos_w[:, self.left_finger_link_idx]
+        robot_right_finger_pos = self._robot.data.body_pos_w[:, self.right_finger_link_idx]
 
 
         return self._compute_rewards(
