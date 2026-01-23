@@ -231,7 +231,7 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv
         self.object_names = sorted(list(sample.keys()))
         if self.debug:
             print(self.object_names)
-        self.object_index = {name: i for i, name in enumerate(self.object_names)} # TODO:overlapping with self.rigid_objects
+        self.object_index = {name: i for i, name in enumerate(self.object_names)}
 
         num_objects = len(self.object_names)
         # 2. Compute max episode length
@@ -619,9 +619,9 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv
         #     print(f"franka_grasp_rot{franka_grasp_rot}\ncream_cheese_grasp_rot{cream_cheese_grasp_rot}")
         
 
-
+        actions_copy = torch.ones_like(actions) * self.common_step_counter
         # regularization on the actions (summed for each environment)
-        action_penalty = torch.sum(actions**2, dim=-1)
+        action_penalty = torch.sum(actions_copy**2, dim=-1)
 
 
 

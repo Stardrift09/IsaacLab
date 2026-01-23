@@ -21,7 +21,7 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.math import sample_uniform
-from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+# from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 @configclass
 class LivingRoomScene1PickUpTheCreamCheeseAndPutItInTheBasketCfg(DirectRLEnvCfg):
     # env
@@ -46,7 +46,7 @@ class LivingRoomScene1PickUpTheCreamCheeseAndPutItInTheBasketCfg(DirectRLEnvCfg)
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=2048, env_spacing=3.0, replicate_physics=True, clone_in_fabric=True
+        num_envs=1024, env_spacing=3.0, replicate_physics=True, clone_in_fabric=True
     )
 
     # robot
@@ -144,10 +144,10 @@ class LivingRoomScene1PickUpTheCreamCheeseAndPutItInTheBasketCfg(DirectRLEnvCfg)
     )
 
     cream_cheese = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/cream_cheese",
+        prim_path="/World/envs/env_.*/alphabet_soup",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0.2, 0.3, 0], rot=[0.7071, 0.7071, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/cream_cheese/usd/cream_cheese.usd",
+            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/alphabet_soup/usd/alphabet_soup.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
@@ -156,10 +156,10 @@ class LivingRoomScene1PickUpTheCreamCheeseAndPutItInTheBasketCfg(DirectRLEnvCfg)
     )
 
     alphabet_soup = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/alphabet_soup",
+        prim_path="/World/envs/env_.*/cream_cheese",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0, 0.5, 0], rot=[0.7071, 0.7071, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/alphabet_soup/usd/alphabet_soup.usd",
+            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/cream_cheese/usd/cream_cheese.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
@@ -236,55 +236,34 @@ class LivingRoomScene1PickUpTheCreamCheeseAndPutItInTheBasket(DirectRLEnv):
         stage = get_current_stage()
 
         prim = stage.GetPrimAtPath("/World/envs/env_0/cream_cheese/grasp_pose")
-        cream_cheese_grasp_pose = get_env_local_pose(
-            self.scene.env_origins[0],
-            UsdGeom.Xformable(prim),
-            self.device,
-        )
-        cream_cheese_local_grasp_pos = cream_cheese_grasp_pose[0:3]
-        cream_cheese_local_grasp_rot = cream_cheese_grasp_pose[3:7] # already in local world coordinate
-        # self.cream_cheese_local_grasp_pos = cream_cheese_local_grasp_pos.repeat((self.num_envs, 1)) # 3
-        # self.cream_cheese_local_grasp_rot = cream_cheese_local_grasp_rot.repeat((self.num_envs, 1)) # 4
-        
-        # print(cream_cheese_local_grasp_rot)        # for debugging
+
         cream_cheese_local_grasp_pose = torch.tensor([0.2, 0.3, 0.03, 1, 0, 0, 0], device=self.device)
-        # self.cream_cheese_local_grasp_pos = cream_cheese_local_grasp_pose[0:3].repeat((self.num_envs, 1))
         self.cream_cheese_grasp_rot = cream_cheese_local_grasp_pose[3:7].repeat((self.num_envs, 1))
 
 
 
-
-        prim = stage.GetPrimAtPath("/World/envs/env_0/cream_cheese")
-        cream_cheese_pose = get_env_local_pose(
-            self.scene.env_origins[0],
-            UsdGeom.Xformable(prim),
-            self.device,
-        )
-        cream_cheese_local_pos = cream_cheese_pose[0:3]
-        cream_cheese_local_rot = cream_cheese_pose[3:7] # to change
-        # print(cream_cheese_local_pos)
-        self.cream_cheese_local_pos = cream_cheese_local_pos.repeat((self.num_envs, 1)) # 3
-        self.cream_cheese_local_rot = cream_cheese_local_rot.repeat((self.num_envs, 1)) # 4
         
    
         bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default"]).ComputeWorldBound(prim)
         min_corner = bbox.GetRange().GetMin()  # Vec3
         max_corner = bbox.GetRange().GetMax()  # Vec3
         cream_cheese_size = torch.tensor((max_corner - min_corner), device=self.device)
+        if self.debug:
+            print(f"cream_cheese_size{cream_cheese_size}")
         cream_cheese_local_center = torch.tensor((min_corner + max_corner)/2, device=self.device)
         self.cream_cheese_size = cream_cheese_size.repeat((self.num_envs, 1)) # 3
-        # self.cream_cheese_local_center = cream_cheese_local_center.repeat((self.num_envs, 1)) # 3
-        # print({f"size{self.cream_cheese_size}"})
-        basket_pose = get_env_local_pose(
-            self.scene.env_origins[0],
-            UsdGeom.Xformable(stage.GetPrimAtPath("/World/envs/env_0/basket")),
-            self.device,
-        )
+        self.single_size = cream_cheese_size
+        
+        # basket_pose = get_env_local_pose(
+        #     self.scene.env_origins[0],
+        #     UsdGeom.Xformable(stage.GetPrimAtPath("/World/envs/env_0/basket")),
+        #     self.device,
+        # )
 
-        basket_local_pos = basket_pose[0:3]
-        basket_local_rot = basket_pose[3:7] # to change
-        self.basket_local_pos = basket_local_pos.repeat((self.num_envs, 1)) # 3
-        self.basket_local_rot = basket_local_rot.repeat((self.num_envs, 1)) # 4
+        # basket_local_pos = basket_pose[0:3]
+        # basket_local_rot = basket_pose[3:7] # to change
+        # self.basket_local_pos = basket_local_pos.repeat((self.num_envs, 1)) # 3
+        # self.basket_local_rot = basket_local_rot.repeat((self.num_envs, 1)) # 4
 
 
         hand_pose = get_env_local_pose(
@@ -311,16 +290,12 @@ class LivingRoomScene1PickUpTheCreamCheeseAndPutItInTheBasket(DirectRLEnv):
         robot_local_grasp_pose_rot, robot_local_pose_pos = tf_combine(
             hand_pose_inv_rot, hand_pose_inv_pos, finger_pose[3:7], finger_pose[0:3]
         )
-        robot_local_pose_pos += torch.tensor([0, 0.04, 0], device=self.device) # it is not necessary since I am not specifying robot grasp pose
+        robot_local_pose_pos += torch.tensor([0, 0.04, 0], device=self.device)
 
         self.robot_local_grasp_pos = robot_local_pose_pos.repeat((self.num_envs, 1)) # 3
         self.robot_local_grasp_rot = robot_local_grasp_pose_rot.repeat((self.num_envs, 1)) # 4
 
 
-        # # ketchup
-        # ketchup_local_grasp_pose = torch.tensor([0.3, 0.01, 0.0, 1.0, 0.0, 0.0, 0.0], device=self.device)
-        # self.ketchup_local_grasp_pos = ketchup_local_grasp_pose[0:3].repeat((self.num_envs, 1))
-        # self.ketchup_local_grasp_rot = ketchup_local_grasp_pose[3:7].repeat((self.num_envs, 1))
 
 
 
@@ -355,9 +330,9 @@ class LivingRoomScene1PickUpTheCreamCheeseAndPutItInTheBasket(DirectRLEnv):
 
 
         # for termination calculation
-        self.basket_pos = torch.zeros((self.num_envs, 3), device=self.device)
-        self.basket_rot = torch.zeros((self.num_envs, 4), device=self.device)
-        self.object_to_container_relative_pos = torch.zeros((self.num_envs, 3), device=self.device)
+        # self.basket_pos = torch.zeros((self.num_envs, 3), device=self.device)
+        # self.basket_rot = torch.zeros((self.num_envs, 4), device=self.device)
+        # self.object_to_container_relative_pos = torch.zeros((self.num_envs, 3), device=self.device)
         # self.cream_cheese_center = torch.zeros((self.num_envs, 3), device=self.device) # I don't need center?
 
         # self.helper_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
@@ -366,22 +341,18 @@ class LivingRoomScene1PickUpTheCreamCheeseAndPutItInTheBasket(DirectRLEnv):
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
-        # self._cabinet = Articulation(self.cfg.cabinet)
         self._ketchup = RigidObject(self.cfg.ketchup)
         self._cream_cheese = RigidObject(self.cfg.cream_cheese)
         self._alphabet_soup = RigidObject(self.cfg.alphabet_soup)
         self._tomato_sauce = RigidObject(self.cfg.tomato_sauce)
         self._basket = RigidObject(self.cfg.basket)
-        # self._butter = RigidObject(self.cfg.butter)
 
         self.scene.articulations["robot"] = self._robot
-        # self.scene.articulations["cabinet"] = self._cabinet
         self.scene.rigid_objects["ketchup"] = self._ketchup
         self.scene.rigid_objects["cream_cheese"] = self._cream_cheese
         self.scene.rigid_objects["alphabet_soup"] = self._alphabet_soup
         self.scene.rigid_objects["tomato_sauce"] = self._tomato_sauce
         self.scene.rigid_objects["basket"] = self._basket
-        # self.scene.rigid_objects["butter"] = self._butter
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
@@ -411,66 +382,8 @@ class LivingRoomScene1PickUpTheCreamCheeseAndPutItInTheBasket(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
 
-        # drawer_top_idx = self._cabinet.find_joints("drawer_top_joint")[0]
-        # print(f"drawer_top_idx:{drawer_top_idx}")
-        # door_left_joint = self._cabinet.find_joints("door_left_joint")[0]
-        # print(f"door_left_joint:{door_left_joint}")
-        # door_right_joint = self._cabinet.find_joints("door_right_joint")[0]
-        # print(f"door_right_joint:{door_right_joint}")
-        # drawer_bottom_joint = self._cabinet.find_joints("drawer_bottom_joint")[0]
-        # print(f"drawer_bottom_joint:{drawer_bottom_joint}")
-
-
-        # put post_physics steps here for earlier update
-
-        hand_pos = self._robot.data.body_pos_w[:, self.hand_link_idx]
-        hand_rot = self._robot.data.body_quat_w[:, self.hand_link_idx]
-        # self._compute_intermediate_values(hand_rot, hand_pos, self.robot_local_grasp_rot, self.robot_local_grasp_pos,
-        #                                   self.robot_grasp_rot,self.robot_grasp_pos)
-        
-        
-        # object_pos = self._cream_cheese.data.root_pos_w
-        # object_rot = self._cream_cheese.data.root_quat_w
-        # self._compute_intermediate_values(object_rot, object_pos, self.cream_cheese_local_grasp_rot, self.cream_cheese_local_grasp_pos,
-        #                                   self.cream_cheese_grasp_rot,self._cream_cheese.data.root_pos_w)
-        
-
-        # basket_pos = self._basket.data.root_pos_w
-        # basket_rot = self._basket.data.root_quat_w
-
-        # self._compute_intermediate_values(basket_rot, basket_pos, self.basket_local_rot, self.basket_local_pos,
-        #                                   self.basket_rot,self.basket_pos)
-
-        self.robot_grasp_rot , self.robot_grasp_pos = tf_combine(
-            hand_rot,
-            hand_pos,
-            self.robot_local_grasp_rot,
-            self.robot_local_grasp_pos,
-            )
-
-        # self.cream_cheese_grasp_rot , self._cream_cheese.data.root_pos_w = tf_combine( # this might be wrong//
-        #     object_rot,
-        #     object_pos,
-        #     self.cream_cheese_local_grasp_rot,
-        #     self.cream_cheese_local_grasp_pos,
-        #     )
-
-
-
-        # self.basket_rot , self.basket_pos = tf_combine(
-        #     basket_rot,
-        #     basket_pos,
-        #     self.basket_local_rot,
-        #     self.basket_local_pos,
-        #     )
-
-        # self.cream_cheese_grasp_rot = self.cream_cheese_local_grasp_rot
-        # self._cream_cheese.data.root_pos_w = self._cream_cheese.data.root_pos_w
-
-        # terminated = self._get_terminated()
 
         terminated = self._cream_cheese.data.root_pos_w[:, 2] > 0.6
-        # print(f"terminated{terminated}")
         truncated = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, truncated
 
@@ -485,7 +398,14 @@ class LivingRoomScene1PickUpTheCreamCheeseAndPutItInTheBasket(DirectRLEnv):
     
     def _get_rewards(self) -> torch.Tensor:
         # Refresh the intermediate values after the physics steps
-
+        hand_pos = self._robot.data.body_pos_w[:, self.hand_link_idx]
+        hand_rot = self._robot.data.body_quat_w[:, self.hand_link_idx]
+        self.robot_grasp_rot , self.robot_grasp_pos = tf_combine(
+            hand_rot,
+            hand_pos,
+            self.robot_local_grasp_rot,
+            self.robot_local_grasp_pos,
+            )
         
         robot_left_finger_pos = self._robot.data.body_pos_w[:, self.left_finger_link_idx]
         robot_right_finger_pos = self._robot.data.body_pos_w[:, self.right_finger_link_idx]
@@ -564,28 +484,9 @@ class LivingRoomScene1PickUpTheCreamCheeseAndPutItInTheBasket(DirectRLEnv):
 
 
 
-
-        # print(root_pos.shape) # num_envs 3
         # Need to refresh the intermediate values so that _get_observations() can use the latest values
         hand_pos = self._robot.data.body_pos_w[env_ids, self.hand_link_idx]
         hand_rot = self._robot.data.body_quat_w[env_ids, self.hand_link_idx]
-
-
-
-        # self._compute_intermediate_values(hand_rot, hand_pos, self.robot_local_grasp_rot, self.robot_local_grasp_pos,
-        #                                   self.robot_grasp_rot,self.robot_grasp_pos,env_ids)
-
-        # object_pos = self._cream_cheese.data.root_pos_w[env_ids] # better use root pos
-        # object_rot = self._cream_cheese.data.root_quat_w[env_ids]
-
-        
-        # self._compute_intermediate_values(object_rot, object_pos, self.cream_cheese_local_grasp_rot, self.cream_cheese_local_grasp_pos,
-        #                                   self.cream_cheese_grasp_rot,self._cream_cheese.data.root_pos_w, env_ids)
-        
-        # basket_pos = self._basket.data.root_pos_w[env_ids]
-        # basket_rot = self._basket.data.root_quat_w[env_ids]
-        # self._compute_intermediate_values(basket_rot, basket_pos, self.basket_local_rot, self.basket_local_pos,
-        #                                   self.basket_rot,self.basket_pos, env_ids)
 
         self.robot_grasp_rot[env_ids] , self.robot_grasp_pos[env_ids] = tf_combine(
             hand_rot,
@@ -593,28 +494,6 @@ class LivingRoomScene1PickUpTheCreamCheeseAndPutItInTheBasket(DirectRLEnv):
             self.robot_local_grasp_rot[env_ids],
             self.robot_local_grasp_pos[env_ids]
             )
-
-        # self.cream_cheese_grasp_rot[env_ids] , self._cream_cheese.data.root_pos_w[env_ids] = tf_combine(
-        #     object_rot,
-        #     object_pos,
-        #     self.cream_cheese_local_grasp_rot[env_ids],
-        #     self.cream_cheese_local_grasp_pos[env_ids]
-        #     )
-
-
-        # self.basket_rot[env_ids] , self.basket_pos[env_ids] = tf_combine(
-        #     basket_rot,
-        #     basket_pos,
-        #     self.basket_local_rot[env_ids],
-        #     self.basket_local_pos[env_ids]
-        #     )
-
-
-        # self.cream_cheese_grasp_rot[env_ids] = self.cream_cheese_local_grasp_rot.clone()[env_ids]
-        # self._cream_cheese.data.root_pos_w[env_ids] = self._cream_cheese.data.root_pos_w[env_ids]
-
-        # self.basket_rot[env_ids] = self._basket.data.body_quat_w[env_ids]
-        # self.basket_pos[env_ids] = self._basket.data.body_pos_w[env_ids]
         
     def _get_observations(self) -> dict:
         dof_pos_scaled = (
@@ -624,60 +503,23 @@ class LivingRoomScene1PickUpTheCreamCheeseAndPutItInTheBasket(DirectRLEnv):
             - 1.0
         )
         to_target = self._cream_cheese.data.root_pos_w - self.robot_grasp_pos
+
+        # task hint: grasp from above without touching it beforehand, since grasping in other directions will push object away.
         obs = torch.cat(
             (
                 dof_pos_scaled,
                 self._robot.data.joint_vel * self.cfg.dof_velocity_scale,
                 to_target,
-                self._basket.data.root_pos_w, # don't use this for now!
-                self._cream_cheese.data.root_pos_w[:,2].unsqueeze(-1),
-                # self._cabinet.data.joint_pos[:, 1].unsqueeze(-1),
-                # self._cabinet.data.joint_vel[:, 1].unsqueeze(-1),
-
+                self._cream_cheese.data.root_pos_w - self.scene.env_origins,
+                self._cream_cheese.data.root_link_vel_w,
+                self._cream_cheese.data.root_quat_w, # 4
+                self.cream_cheese_size, # 3
             ),
             dim=-1,
         )
         return {"policy": torch.clamp(obs, -5.0, 5.0)}
 
     # auxiliary methods
-
-    def _compute_intermediate_values(self, hand_rot, hand_pos, hand_local_grasp_rot,hand_local_grasp_pos, hand_grasp_rot,
-                                      hand_grasp_pos, env_ids: torch.Tensor | None = None):
-        if env_ids is None:
-            env_ids = self._robot._ALL_INDICES
-
-
-        # print(f"drawer_link_idx{self.drawer_link_idx}")
-        # drawer_top_idx = self._cabinet.find_joints("drawer_top_joint")[0]
-        # print(f"drawer_top_idx:{drawer_top_idx}")
-
-        # drawer_pos = self._cabinet.data.body_pos_w[env_ids, self.drawer_link_idx]
-        # drawer_rot = self._cabinet.data.body_quat_w[env_ids, self.drawer_link_idx]
-
-        # # Example: open the drawer halfway in all selected environments
-        # open_value = 0.2  # meters or radians depending on your drawer joint
-        # env_ids = torch.arange(self.num_envs, device=self.device)  # all envs
-
-        # # Create joint state tensor
-        # drawer_joints = self._cabinet.data.joint_pos.clone()
-        # drawer_joints[:, self.drawer_top_idx] = open_value  # only top drawer
-
-        # # Zero velocities
-        # drawer_vels = torch.zeros_like(drawer_joints)
-
-        # # Write to simulation
-        # self._cabinet.write_joint_state_to_sim(drawer_joints, drawer_vels, env_ids=env_ids)
-
-
-        hand_grasp_rot[env_ids] , hand_grasp_pos[env_ids] = tf_combine(
-            hand_rot,
-            hand_pos,
-            hand_local_grasp_rot[env_ids],
-            hand_local_grasp_pos[env_ids]
-            )
-        # hand_grasp_rot[env_ids] = rot
-        # hand_grasp_pos[env_ids] = pos
-
 
 
     def _compute_rewards(
@@ -741,20 +583,16 @@ class LivingRoomScene1PickUpTheCreamCheeseAndPutItInTheBasket(DirectRLEnv):
 
 
         # penalty for distance of each finger from the drawer handle
-        lfinger_dist = franka_lfinger_pos[:, 2] - cream_cheese_grasp_pos[:, 2]
-        rfinger_dist = cream_cheese_grasp_pos[:, 2] - franka_rfinger_pos[:, 2]
+        lfinger_dist = franka_lfinger_pos[:, 1] - cream_cheese_grasp_pos[:, 1]
+        rfinger_dist = cream_cheese_grasp_pos[:, 1] - franka_rfinger_pos[:, 1]
         finger_dist_penalty = torch.zeros_like(lfinger_dist)
         finger_dist_penalty += torch.where(lfinger_dist < 0, lfinger_dist, torch.zeros_like(lfinger_dist))
         finger_dist_penalty += torch.where(rfinger_dist < 0, rfinger_dist, torch.zeros_like(rfinger_dist))
+        threshold = torch.min(self.single_size, dim=-1).values + 0.02
+        mask = d < threshold                   # shape: (num_envs,)
+        penalty = torch.zeros_like(d)
+        penalty[mask] = finger_dist_penalty[mask]                  # or any penalty function you want
 
-        # new rotation reward
-        w = franka_grasp_rot[:, 3].clamp(-1.0, 1.0)
-        angle = 2.0 * torch.acos(torch.abs(w))
-
-        grasp_close = (d < 0.1).float()
-        lift_height = torch.clamp(cream_cheese_pos[:, 2], 0.0, 1)
-
-        lift_reward = grasp_close * lift_height
 
 
 
@@ -763,18 +601,22 @@ class LivingRoomScene1PickUpTheCreamCheeseAndPutItInTheBasket(DirectRLEnv):
             # + rot_reward_scale * rot_reward
             + finger_reward_scale * finger_dist_penalty
             - action_penalty_scale * action_penalty
-            + lift_reward
+            # + lift_reward
         )
 
         self.extras["log"] = {
             "dist_reward": (dist_reward_scale * dist_reward).mean(),
-            "rot_reward": (rot_reward_scale * rot_reward).mean(),
+            # "rot_reward": (rot_reward_scale * rot_reward).mean(),
             "action_penalty": (-action_penalty_scale * action_penalty).mean(),
             "left_finger_distance_reward": (finger_reward_scale * lfinger_dist).mean(),
             "right_finger_distance_reward": (finger_reward_scale * rfinger_dist).mean(),
             "finger_dist_penalty": (finger_reward_scale * finger_dist_penalty).mean(),
         }
 
+        rewards = torch.where(self._cream_cheese.data.root_pos_w[:, 2] > 0.03, rewards + 0.25, rewards)
+        rewards = torch.where(self._cream_cheese.data.root_pos_w[:, 2] > 0.2, rewards + 0.25, rewards)
+        rewards = torch.where(self._cream_cheese.data.root_pos_w[:, 2] > 0.35, rewards + 0.25, rewards)
+        rewards = torch.where(self._cream_cheese.data.root_pos_w[:, 2] > 0.5, rewards + 0.25, rewards)
         # rewards = torch.where(cream_cheese_pos[:,2] > 0.1, rewards + 1, rewards)
         return rewards
 
@@ -782,25 +624,4 @@ class LivingRoomScene1PickUpTheCreamCheeseAndPutItInTheBasket(DirectRLEnv):
 
 
 
-
-
-    # def _compute_grasp_transforms(
-    #     self,
-    #     hand_rot,
-    #     hand_pos,
-    #     franka_local_grasp_rot,
-    #     franka_local_grasp_pos,
-    #     drawer_rot,
-    #     drawer_pos,
-    #     drawer_local_grasp_rot,
-    #     drawer_local_grasp_pos,
-    # ):
-    #     global_franka_rot, global_franka_pos = tf_combine(
-    #         hand_rot, hand_pos, franka_local_grasp_rot, franka_local_grasp_pos
-    #     )
-    #     global_drawer_rot, global_drawer_pos = tf_combine(
-    #         drawer_rot, drawer_pos, drawer_local_grasp_rot, drawer_local_grasp_pos
-    #     )
-
-    #     return global_franka_rot, global_franka_pos, global_drawer_rot, global_drawer_pos
 
