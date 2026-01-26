@@ -21,9 +21,10 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.math import sample_uniform
+from torch.utils.tensorboard import SummaryWriter
 # from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 @configclass
-class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg):
+class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 8.3333  # 500 timesteps
     decimation = 2
@@ -31,7 +32,6 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRL
     observation_space = 25 # to modify
     state_space = 0
     path = "libero/trajs/libero90/libero_90_living_room_scene1_pick_up_the_alphabet_soup_and_put_it_in_the_basket_traj_v2.pkl"
-
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,
@@ -143,7 +143,7 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRL
         ),
     )
 
-    alphabet_soup = RigidObjectCfg(
+    cream_cheese = RigidObjectCfg(
         prim_path="/World/envs/env_.*/alphabet_soup",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0.2, 0.3, 0], rot=[0.7071, 0.7071, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
@@ -155,7 +155,7 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRL
         ),
     )
 
-    cream_cheese = RigidObjectCfg(
+    alphabet_soup = RigidObjectCfg(
         prim_path="/World/envs/env_.*/cream_cheese",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0, 0.5, 0], rot=[0.7071, 0.7071, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
@@ -190,7 +190,7 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRL
     finger_reward_scale = 2.0
 
 
-class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
+class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
     # pre-physics step calls
     #   |-- _pre_physics_step(action)
     #   |-- _apply_action()
@@ -200,95 +200,34 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv
     #   |-- _reset_idx(env_ids)
     #   |-- _get_observations()
 
-    cfg: ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg
+    cfg: LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg
 
-    def __init__(self, cfg: ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg, render_mode: str | None = None, **kwargs):
-        self.debug = False  
+    def __init__(self, cfg: LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg, render_mode: str | None = None, **kwargs):
+        self.debug = True  
         self.path = cfg.path # scene init is called in super
         from isaaclab_eureka.utils import read_pkl
         self.data = read_pkl(self.path) 
-        lengths = [len(ep["states"]) for ep in self.data["franka"]]
-        self.max_len = max(lengths)
         # [num_envs, step, states]
         # first loop over, add padding, then stack.
-
-        
-        episodes = self.data["franka"]
-        num_envs = len(episodes) # overwrite num_envs
-        cfg.scene = InteractiveSceneCfg(
-            num_envs=num_envs, env_spacing=3.0, replicate_physics=True, clone_in_fabric=True
-        )
-
-
-        super().__init__(cfg, render_mode, **kwargs)
-
-
-
-        sample = episodes[0]["states"][0].copy()
-        sample.pop("franka", None)
-        
-        # 1. Determine object names and ordering
-        self.object_names = sorted(list(sample.keys()))
-        if self.debug:
-            print(self.object_names)
-        self.object_index = {name: i for i, name in enumerate(self.object_names)}
-
-        num_objects = len(self.object_names)
-        # 2. Compute max episode length
-        lengths = [len(ep["states"]) for ep in episodes]
-        if self.debug:
-            print(lengths)
-        max_len = max(lengths)
-        if self.debug:
-            print(f"max_len {max_len}")
-        # 3. Determine state dimensions
-        # robot
-        robot_pos_dim = len(episodes[0]["states"][0]["franka"]["pos"])      # 3
-
-        # actually I am not using this..
-        robot_rot_dim = len(episodes[0]["states"][0]["franka"]["rot"])      # 4
-        robot_dof_dim = len(episodes[0]["states"][0]["franka"]["dof_pos"])  # num_joints
-
-        # rigid objects (all share same structure)
-        one_obj = next(iter({k: v for k, v in sample.items() if k != "franka"}.values()))
-        object_pos_dim = len(one_obj["pos"])              # 3
-        object_rot_dim = len(one_obj["rot"])              # 4
-
-        # 4. Preallocate tensors
-        # self.robot_pos = torch.zeros((self.num_envs, max_len, robot_pos_dim))
-        # self.robot_rot = torch.zeros((self.num_envs, max_len, robot_rot_dim))
-        self.robot_dof = torch.zeros((self.num_envs, max_len, robot_dof_dim),device=self.device,dtype=torch.float32)
-
-        self.object_pos = torch.zeros((self.num_envs, max_len, num_objects, object_pos_dim),device=self.device,dtype=torch.float32)
-        self.object_rot = torch.zeros((self.num_envs, max_len, num_objects, object_rot_dim),device=self.device,dtype=torch.float32)
-
-        self.padding_mask = torch.ones((self.num_envs, max_len), dtype=torch.bool)
-
-        # 5. Fill tensors
-        for env_idx, ep in enumerate(episodes): # each episode
-            ep_len = lengths[env_idx]
-
-            for t, state in enumerate(ep["states"]):
-                # robot
-                # self.robot_pos[env_idx, t] = torch.tensor(state["franka"]["pos"])
-                # self.robot_rot[env_idx, t] = torch.tensor(state["franka"]["rot"])
-
-                dof_vals = [v[0] for v in state["franka"]["dof_pos"].values()]
-                self.robot_dof[env_idx, t] = torch.tensor(dof_vals)
-
-                # objects
-                for obj_idx, obj_name in enumerate(self.object_names):
-                    obj = state[obj_name]
-                    self.object_pos[env_idx, t, obj_idx] = torch.tensor(obj["pos"])
-                    self.object_rot[env_idx, t, obj_idx] = torch.tensor(obj["rot"])
-
-            # padding mask
-            self.padding_mask[env_idx, :ep_len] = False
-
-        # should be different for interaction and placement predicate, here placement
-
+        self.episodes = self.data["franka"]
+        self.target_object_name = "alphabet_soup"
         self.target_region = "basket"
         self.input_direction = 2 # z axis
+        super().__init__(cfg, render_mode, **kwargs)
+        self.log_dir = "/home/shaotongchen/workspace_eureka/IsaacLabEureka/logs/replay_test"
+        self.sample = self.episodes[0]["states"][0].copy()
+        self.sample.pop("franka", None)
+        
+        # 1. Determine object names and ordering
+
+        self.object_names = sorted(list(self.sample.keys()))
+        self.object_indices = {name: i for i, name in enumerate(self.object_names)}
+
+        # expose the following to llm
+        # self.task_type = "placement"
+
+
+        
 
         def get_env_local_pose(env_pos: torch.Tensor, xformable: UsdGeom.Xformable, device: torch.device):
             """Compute pose in env-local coordinates"""
@@ -320,44 +259,12 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv
 
         stage = get_current_stage()
 
+        prim = stage.GetPrimAtPath(f"/World/envs/env_0/{self.target_object_name}")
 
-        stage = get_current_stage()
-
-        prim = stage.GetPrimAtPath("/World/envs/env_0/alphabet_soup")
         bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default"]).ComputeWorldBound(prim)
         min_corner = bbox.GetRange().GetMin()  # Vec3
         max_corner = bbox.GetRange().GetMax()  # Vec3
         self.target_object_size = torch.tensor((max_corner - min_corner), device=self.device)
-
-
-
-        alphabet_soup_local_grasp_pose = torch.tensor([0.2, 0.3, 0.03, 1, 0, 0, 0], device=self.device)
-        self.alphabet_soup_grasp_rot = alphabet_soup_local_grasp_pose[3:7].repeat((self.num_envs, 1))
-
-
-
-        
-   
-        bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default"]).ComputeWorldBound(prim)
-        min_corner = bbox.GetRange().GetMin()  # Vec3
-        max_corner = bbox.GetRange().GetMax()  # Vec3
-        alphabet_soup_size = torch.tensor((max_corner - min_corner), device=self.device)
-        if self.debug:
-            print(f"alphabet_soup_size {alphabet_soup_size}")
-        alphabet_soup_local_center = torch.tensor((min_corner + max_corner)/2, device=self.device)
-        self.alphabet_soup_size = alphabet_soup_size.repeat((self.num_envs, 1)) # 3
-        self.single_size = alphabet_soup_size
-        
-        # basket_pose = get_env_local_pose(
-        #     self.scene.env_origins[0],
-        #     UsdGeom.Xformable(stage.GetPrimAtPath("/World/envs/env_0/basket")),
-        #     self.device,
-        # )
-
-        # basket_local_pos = basket_pose[0:3]
-        # basket_local_rot = basket_pose[3:7] # to change
-        # self.basket_local_pos = basket_local_pos.repeat((self.num_envs, 1)) # 3
-        # self.basket_local_rot = basket_local_rot.repeat((self.num_envs, 1)) # 4
 
 
         hand_pose = get_env_local_pose(
@@ -389,51 +296,15 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv
         self.robot_local_grasp_pos = robot_local_pose_pos.repeat((self.num_envs, 1)) # 3
         self.robot_local_grasp_rot = robot_local_grasp_pose_rot.repeat((self.num_envs, 1)) # 4
 
-
-
-
-
-        self.gripper_forward_axis = torch.tensor([0, 0, 1], device=self.device, dtype=torch.float32).repeat(
-            (self.num_envs, 1)
-        )
-        self.alphabet_soup_inward_axis = torch.tensor([-1, 0, 0], device=self.device, dtype=torch.float32).repeat(
-            (self.num_envs, 1)
-        )
-        self.gripper_up_axis = torch.tensor([0, 1, 0], device=self.device, dtype=torch.float32).repeat(
-            (self.num_envs, 1)
-        )
-        self.alphabet_soup_up_axis = torch.tensor([0, 0, 1], device=self.device, dtype=torch.float32).repeat(
-            (self.num_envs, 1)
-        )
-        self.basket_up_axis = torch.tensor([0, 0, 1], device=self.device, dtype=torch.float32).repeat(
-            (self.num_envs, 1)
-        )
-
-
         self.hand_link_idx = self._robot.find_bodies("panda_link7")[0][0]
         self.left_finger_link_idx = self._robot.find_bodies("panda_leftfinger")[0][0]
         self.right_finger_link_idx = self._robot.find_bodies("panda_rightfinger")[0][0]
-        # self.drawer_link_idx = self._cabinet.find_bodies("drawer_top")[0][0] # body index is different from joint index
-        # self.drawer_top_idx = self._cabinet.find_joints("drawer_top_joint")[0] # joint index
-        
+
         self.robot_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
         self.robot_grasp_pos = torch.zeros((self.num_envs, 3), device=self.device)
 
-        # self.cream_cheese_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
-        # self._cream_cheese.data.root_pos_w = torch.zeros((self.num_envs, 3), device=self.device)
 
-
-        # for termination calculation
-        # self.basket_pos = torch.zeros((self.num_envs, 3), device=self.device)
-        # self.basket_rot = torch.zeros((self.num_envs, 4), device=self.device)
-        # self.object_to_container_relative_pos = torch.zeros((self.num_envs, 3), device=self.device)
-        # self.cream_cheese_center = torch.zeros((self.num_envs, 3), device=self.device) # I don't need center?
-
-        # self.helper_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
-        # self.helper_grasp_pos = torch.zeros((self.num_envs, 3), device=self.device)
-
-
-    def _setup_scene(self): # done
+    def _setup_scene(self):
         init_states = self.data['franka'][0]["init_state"] # this is from the first scene as set up. Init states of traj should be updated in reset_idx
         robot_data = init_states['franka'] # seems that joint pos for isaaclab is always positive
         robot_joint_pos = robot_data["dof_pos"]
@@ -442,8 +313,6 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv
         print(f"robot_joint_pos:{robot_joint_pos}")
         robot_joint_pos = {k: v.item() for k, v in robot_joint_pos.items()}
 
-        if self.debug:
-            print(f"robot_joint_pos {robot_joint_pos}")
         robot_cfg = ArticulationCfg(
             prim_path="/World/envs/env_.*/Robot",
             spawn=sim_utils.UsdFileCfg(
@@ -487,10 +356,11 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv
         self.scene.articulations["robot"] = self._robot
 
         #TODO: for the rest: consider if the task has articulation
-
+        self.rigid_objects = {}
         keys = list(init_states.keys())
         keys.remove("franka")   # remove the one you don't want
-        self.rigid_objects = {}
+
+
         for k in keys:
             cfg = RigidObjectCfg(
                 prim_path=f"/World/envs/env_.*/{k}",
@@ -499,7 +369,7 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv
                     rot=init_states[k]["rot"],
                 ),
                 spawn=sim_utils.UsdFileCfg(
-                    usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/{k}/usd/{k}.usd",
+                    usd_path=f"libero/COMMON/stable_hope_objects/{k}/usd/{k}.usd",
                     rigid_props=sim_utils.RigidBodyPropertiesCfg(),
                     articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                         articulation_enabled=False
@@ -509,12 +379,11 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv
             object = RigidObject(cfg)
             self.rigid_objects[k] = object
             self.scene.rigid_objects[k] = object # can I directly assign the dict?
-        self.target_object_name = "alphabet_soup"
-        self.target_region = "basket"
-        self.input_direction = 2 # z axis
+
+
+            
         self.target_object : RigidObject = self.rigid_objects[self.target_object_name]
-        if self.debug:
-            print(self.rigid_objects.keys())
+
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
@@ -532,68 +401,56 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv
     # pre-physics step calls
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        pass
+        self.actions = actions.clone().clamp(-1.0, 1.0)
+        targets = self.robot_dof_targets + self.robot_dof_speed_scales * self.dt * self.actions * self.cfg.action_scale
+        self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
 
 
-    def _apply_action(self): # done, here applying states
-        # here apply all states
-        t = self.common_step_counter
-        joint_pos = self.robot_dof[:,t,:]
-        joint_vel = torch.zeros_like(joint_pos)
-        self._robot.write_joint_state_to_sim(joint_pos, joint_vel)
-        # If I want velocity, then I have to run the controllers instead of directly setting states
-
-        for object_name in self.object_names:
-            i= self.object_index[object_name]
-            object = self.rigid_objects[object_name]
-            object_state = torch.zeros((self.num_envs, 13), device=self.device)
-            object_state[:,0:3] = self.object_pos[:,t,i,:] + self.scene.env_origins
-            object_state[:,3:7] = self.object_rot[:,t,i,:]
-            object.write_root_pose_to_sim(object_state[:, :7])
-            object.write_root_velocity_to_sim(object_state[:, 7:])
-
+    def _apply_action(self):
+        self._robot.set_joint_position_target(self.robot_dof_targets)
 
     # post-physics step calls
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
 
-
-
-        truncated = self.episode_length_buf >= self.max_len
-        terminated = truncated # Here for avoiding reset with single 
+        terminated = self.target_object.data.root_pos_w[:, 2] > 0.6
+        truncated = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, truncated
     
     def _get_rewards(self) -> torch.Tensor:
 
-        return self._compute_rewards(self.actions
-                                     ,self.cfg.action_penalty_scale)
+        return self._compute_rewards(self.actions,self.cfg.action_penalty_scale,)
 
 
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
-        if self.debug:
-            print(f"current_time_step:{self.common_step_counter}")
-        if self.common_step_counter == 0:
-            print("resetting")
-            super()._reset_idx(env_ids)
-            t = self.common_step_counter
-            joint_pos = self.robot_dof[:,t,:]
-            joint_vel = torch.zeros_like(joint_pos)
-            self._robot.write_joint_state_to_sim(joint_pos, joint_vel)
-            # If I want velocity, then I have to run the controllers instead of directly setting states
+        super()._reset_idx(env_ids)
+        # robot state
+        joint_pos = self._robot.data.default_joint_pos[env_ids] + sample_uniform(
+            -0.125,
+            0.125,
+            (len(env_ids), self._robot.num_joints),
+            self.device,
+        )
+        joint_pos = torch.clamp(joint_pos, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
+        joint_vel = torch.zeros_like(joint_pos)
+        self._robot.set_joint_position_target(joint_pos, env_ids=env_ids)
+        self._robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
 
-            for object_name in self.object_names:
-                i= self.object_index[object_name]
-                object = self.rigid_objects[object_name]
-                object_state = torch.zeros((self.num_envs, 13), device=self.device)
-                object_state[:,0:3] = self.object_pos[:,t,i,:] + self.scene.env_origins
-                object_state[:,3:7] = self.object_rot[:,t,i,:]
-                object.write_root_pose_to_sim(object_state[:, :7])
-                object.write_root_velocity_to_sim(object_state[:, 7:])
-        else:
-            if self.debug:
-                print("time step none zero, pass")
-        
+        # for objects
+        for object_name in self.object_names:
+            object = self.rigid_objects[object_name]
+            object_default_state = object.data.default_root_state.clone()[env_ids]
+
+            object_default_state[:, 0:3] = (
+                object_default_state[:, 0:3] + self.scene.env_origins[env_ids]
+            )
+
+            object_default_state[:, 7:] = torch.zeros_like(object.data.default_root_state[env_ids, 7:])
+            object.write_root_pose_to_sim(object_default_state[:, :7], env_ids)
+            object.write_root_velocity_to_sim(object_default_state[:, 7:], env_ids)
+
+    
     def _get_observations(self) -> dict:
         dof_pos_scaled = (
             2.0
@@ -602,16 +459,18 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv
             - 1.0
         )
 
-
-
+        # you can access the object size via self.target_object_size
         obs = torch.cat(
             (
                 dof_pos_scaled,
                 self._robot.data.joint_vel * self.cfg.dof_velocity_scale,
+                self.target_object.data.root_pos_w -self.scene.env_origins,
+                self.target_object.data.root_quat_w,
             ),
             dim=-1,
         )
-        return {}
+
+        return {"policy": torch.clamp(obs, -5.0, 5.0)}
 
     # auxiliary methods
 
@@ -627,11 +486,9 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv
         # print(franka_grasp_pos)
 
 
-        # if self.debug:
-        #     print(f"franka_grasp_rot{franka_grasp_rot}\ncream_cheese_grasp_rot{cream_cheese_grasp_rot}")
-        
 
-        actions_copy = torch.ones_like(actions) * self.common_step_counter
+
+        actions_copy = torch.zeros_like(actions) * self.common_step_counter
         # regularization on the actions (summed for each environment)
         action_penalty = torch.sum(actions_copy**2, dim=-1)
 
@@ -652,7 +509,6 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv
 
 
     
-
     def _get_rewards_eureka(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         import torch
 
@@ -953,3 +809,125 @@ class ReplayLivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv
         }
 
         return reward, individual_rewards
+
+
+
+    def run_replay(self):
+        # [num_envs, step, states]
+        # first loop over, add padding, then stack.
+        writer = SummaryWriter(self.log_dir)
+        num_episodes = len(self.episodes)
+        env_ids = torch.arange(50, device=self.device, dtype=torch.long)
+        eureka_episode_sums = dict()
+        eureka_episode_sums["eureka_total_rewards"] = torch.zeros(num_episodes, device=self.device)
+        eureka_episode_sums["oracle_total_rewards"] = torch.zeros(num_episodes, device=self.device)
+
+        num_objects = len(self.object_names)
+
+        # 2. Compute max episode length
+        lengths = [len(ep["states"]) for ep in self.episodes]
+        if self.debug:
+            print(lengths)
+        max_len = max(lengths)
+        if self.debug:
+            print(f"max_len {max_len}")
+            print(f"num_envs: {self.num_envs}")
+        # 3. Determine state dimensions
+        # robot
+        robot_pos_dim = len(self.episodes[0]["states"][0]["franka"]["pos"])      # 3
+
+        # actually I am not using this..
+        robot_rot_dim = len(self.episodes[0]["states"][0]["franka"]["rot"])      # 4
+        robot_dof_dim = len(self.episodes[0]["states"][0]["franka"]["dof_pos"])  # num_joints
+
+        # rigid objects (all share same structure)
+        one_obj = next(iter({k: v for k, v in self.sample.items() if k != "franka"}.values()))
+        object_pos_dim = len(one_obj["pos"])              # 3
+        object_rot_dim = len(one_obj["rot"])              # 4
+
+        # 4. Preallocate tensors
+        # robot_pos = torch.zeros((num_episodes, max_len, robot_pos_dim))
+        # robot_rot = torch.zeros((num_episodes, max_len, robot_rot_dim))
+        robot_dof = torch.zeros((self.num_envs, max_len, robot_dof_dim),device=self.device,dtype=torch.float32)
+
+        object_pos = torch.zeros((self.num_envs, max_len, num_objects, object_pos_dim),device=self.device,dtype=torch.float32)
+        object_rot = torch.zeros((self.num_envs, max_len, num_objects, object_rot_dim),device=self.device,dtype=torch.float32)
+
+        padding_mask = torch.ones((self.num_envs, max_len), dtype=torch.bool)
+
+        # 5. Fill tensors
+        for env_idx, ep in enumerate(self.episodes): # each episode
+            ep_len = lengths[env_idx]
+
+            for t, state in enumerate(ep["states"]):
+                # robot
+                # robot_pos[env_idx, t] = torch.tensor(state["franka"]["pos"])
+                # robot_rot[env_idx, t] = torch.tensor(state["franka"]["rot"])
+
+                dof_vals = [v[0] for v in state["franka"]["dof_pos"].values()]
+                dof_vals[-1] = - dof_vals[-1]
+                # print(dof_vals)
+                robot_dof[env_idx, t] = torch.tensor(dof_vals)
+
+                # objects
+                for obj_name, obj_idx in self.object_indices.items():
+                    obj = state[obj_name]
+                    object_pos[env_idx, t, obj_idx] = torch.tensor(obj["pos"])
+                    object_rot[env_idx, t, obj_idx] = torch.tensor(obj["rot"])
+            # padding mask
+            padding_mask[env_idx, :ep_len] = False
+
+
+        # Next step: Set states, call reward function, log
+
+        for t in range(max_len):
+            # set states
+            joint_pos = robot_dof[:,t,:]
+            # print(joint_pos[0,-2:])
+            joint_vel = torch.zeros_like(joint_pos)
+            self._robot.write_joint_state_to_sim(joint_pos, joint_vel)
+            for obj_name, obj_idx in self.object_indices.items():
+                object = self.rigid_objects[obj_name]
+                object_state = torch.zeros((self.num_envs, 13), device=self.device)
+                object_state[:,0:3] = object_pos[:,t,obj_idx,:] + self.scene.env_origins
+                object_state[:,3:7] = object_rot[:,t,obj_idx,:]
+                object.write_root_pose_to_sim(object_state[:, :7])
+                object.write_root_velocity_to_sim(object_state[:, 7:])
+           
+           # similar to step function
+            self.scene.write_data_to_sim()
+            self.sim.step(render=True)
+            if t%2 ==0:
+                self.sim.render()
+            self.scene.update(dt=self.physics_dt)
+            # import pdb
+            # pdb.set_trace()
+
+            # call reward function, should be from eureka
+            if hasattr(self, "_get_rewards_eureka"):
+                # dict value size is equal to num of envs
+                # rewards_oracle = self._get_rewards_oracle()
+                rewards_eureka, rewards_dict = self._get_rewards_eureka()
+                # rewards_oracle_replay =rewards_oracle[:num_episodes]
+                rewards_eureka_replay = rewards_eureka[:num_episodes]
+                rewards_dict_replay = { k: v[:num_episodes] for k, v in rewards_dict.items() }
+                eureka_episode_sums["eureka_total_rewards"] += rewards_eureka_replay
+                # eureka_episode_sums["oracle_total_rewards"] += rewards_oracle_replay
+                for key in rewards_dict_replay.keys():
+                    if key not in eureka_episode_sums:
+                        eureka_episode_sums[key] = torch.zeros(num_episodes, device=self.device)
+                    eureka_episode_sums[key] += rewards_dict_replay[key]
+
+
+                for k in eureka_episode_sums.keys():
+                    writer.add_scalar("Replay/"+k, eureka_episode_sums[k].mean().item(), t) 
+
+
+
+
+        # reset the first num_envs environment, or all
+
+
+            # env_ids = torch.arange(50, device=self.device, dtype=torch.long)
+            # self._reset_idx(env_ids)
+
