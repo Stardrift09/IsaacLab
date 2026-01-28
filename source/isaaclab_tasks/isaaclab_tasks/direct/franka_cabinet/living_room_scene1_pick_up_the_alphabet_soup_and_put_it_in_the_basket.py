@@ -23,6 +23,8 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.math import sample_uniform
 from torch.utils.tensorboard import SummaryWriter
 # from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+
+EUREKA_ROOT_DIR = "/home/shaotongchen/workspace_eureka/IsaacLabEureka"
 @configclass
 class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg):
     # env
@@ -31,7 +33,12 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg
     action_space = 9
     observation_space = 25 # to modify
     state_space = 0
-    path = "libero/trajs/libero90/libero_90_living_room_scene1_pick_up_the_alphabet_soup_and_put_it_in_the_basket_traj_v2.pkl"
+    # train_with_isaaclab =True
+
+    # if train_with_isaaclab:
+    path = f"{EUREKA_ROOT_DIR}/libero/trajs/libero90/libero_90_living_room_scene1_pick_up_the_alphabet_soup_and_put_it_in_the_basket_traj_v2.pkl"
+    # else:
+    #     path = "libero/trajs/libero90/libero_90_living_room_scene1_pick_up_the_alphabet_soup_and_put_it_in_the_basket_traj_v2.pkl"
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,
@@ -47,7 +54,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=50, env_spacing=3.0, replicate_physics=True, clone_in_fabric=True
+        num_envs=1024, env_spacing=3.0, replicate_physics=True, clone_in_fabric=True
     )
 
     # robot
@@ -203,7 +210,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
     cfg: LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg
 
     def __init__(self, cfg: LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg, render_mode: str | None = None, **kwargs):
-        self.debug = True  
+        self.debug = False  
         self.path = cfg.path # scene init is called in super
         from isaaclab_eureka.utils import read_pkl
         self.data = read_pkl(self.path) 
@@ -308,9 +315,9 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
         init_states = self.data['franka'][0]["init_state"] # this is from the first scene as set up. Init states of traj should be updated in reset_idx
         robot_data = init_states['franka'] # seems that joint pos for isaaclab is always positive
         robot_joint_pos = robot_data["dof_pos"]
-        print(f"robot_joint_pos:{robot_joint_pos}")
+        # print(f"robot_joint_pos:{robot_joint_pos}")
         robot_joint_pos['panda_finger_joint2'] = robot_joint_pos['panda_finger_joint1']
-        print(f"robot_joint_pos:{robot_joint_pos}")
+        # print(f"robot_joint_pos:{robot_joint_pos}")
         robot_joint_pos = {k: v.item() for k, v in robot_joint_pos.items()}
 
         robot_cfg = ArticulationCfg(
@@ -369,7 +376,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
                     rot=init_states[k]["rot"],
                 ),
                 spawn=sim_utils.UsdFileCfg(
-                    usd_path=f"libero/COMMON/stable_hope_objects/{k}/usd/{k}.usd",
+                    usd_path=f"{EUREKA_ROOT_DIR}/libero/COMMON/stable_hope_objects/{k}/usd/{k}.usd",
                     rigid_props=sim_utils.RigidBodyPropertiesCfg(),
                     articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                         articulation_enabled=False
@@ -412,6 +419,13 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
     # post-physics step calls
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        # manual update for observation needed values
+        hand_pos = self._robot.data.body_pos_w[:, self.hand_link_idx]
+        hand_rot = self._robot.data.body_quat_w[:, self.hand_link_idx]
+
+        self.robot_grasp_rot, self.robot_grasp_pos = tf_combine(
+            hand_rot, hand_pos, self.robot_local_grasp_rot, self.robot_local_grasp_pos
+        )
 
         terminated = self.target_object.data.root_pos_w[:, 2] > 0.6
         truncated = self.episode_length_buf >= self.max_episode_length - 1
@@ -421,6 +435,160 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
 
         return self._compute_rewards(self.actions,self.cfg.action_penalty_scale,)
 
+    # def _get_rewards(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    #     # All tensors on the correct device
+    #     device = self.device
+    #     eps = 1e-6
+
+    #     # ------------------------------------------------------------
+    #     # Retrieve and sanitize useful state variables
+    #     # ------------------------------------------------------------
+    #     # End-effector / grasp pose
+    #     ee_pos = torch.nan_to_num(self.robot_grasp_pos, nan=0.0, posinf=0.0, neginf=0.0)
+
+    #     # Object pose (use the same computation as in observations)
+    #     obj_root_pos = torch.nan_to_num(self.target_object.data.root_pos_w, nan=0.0, posinf=0.0, neginf=0.0)
+    #     env_origins = torch.nan_to_num(self.scene.env_origins, nan=0.0, posinf=0.0, neginf=0.0)
+
+    #     # Compute object top position in environment frame (same as obs)
+    #     target_object_root = obj_root_pos - env_origins
+    #     target_object_root = torch.nan_to_num(target_object_root, nan=0.0, posinf=0.0, neginf=0.0)
+    #     target_object_root[:, 2] += float(self.target_object_size[2])
+
+    #     # Relative pose: vector from EE to object top
+    #     to_target = torch.nan_to_num(target_object_root - ee_pos, nan=0.0, posinf=0.0, neginf=0.0)
+
+    #     # Object quaternion
+    #     obj_quat = torch.nan_to_num(self.target_object.data.root_quat_w, nan=0.0, posinf=0.0, neginf=0.0)
+
+    #     # Joint info
+    #     joint_pos = torch.nan_to_num(self._robot.data.joint_pos, nan=0.0, posinf=0.0, neginf=0.0)
+    #     joint_vel = torch.nan_to_num(self._robot.data.joint_vel, nan=0.0, posinf=0.0, neginf=0.0)
+
+    #     # Optionally: gripper (assuming last one or two DOFs are fingers; guard with slicing)
+    #     # If not applicable, these terms will be very small and not dominate.
+    #     finger_dofs = 2
+    #     if joint_pos.shape[1] >= finger_dofs:
+    #         finger_pos = joint_pos[:, -finger_dofs:]
+    #     else:
+    #         finger_pos = torch.zeros((self.num_envs, finger_dofs), device=device)
+
+    #     # ------------------------------------------------------------
+    #     # Helper norms
+    #     # ------------------------------------------------------------
+    #     dist_xy = torch.linalg.norm(to_target[:, :2], dim=-1)            # horizontal distance
+    #     dist_z  = torch.abs(to_target[:, 2])                             # vertical offset
+
+    #     # Distance from EE to object top in 3D
+    #     dist_3d = torch.linalg.norm(to_target, dim=-1)
+
+    #     # ------------------------------------------------------------
+    #     # 1) Approach from above: encourage being above object and aligned in XY
+    #     # ------------------------------------------------------------
+    #     # Want EE directly above object: small XY distance, positive Z offset
+    #     # XY reward (exponential, bounded in [0,1]):
+    #     temp_xy = 5.0  # temperature for XY distance shaping
+    #     rew_xy = torch.exp(-temp_xy * dist_xy)
+
+    #     # Z-from-above reward: positive when EE is above object top, zero/negative otherwise
+    #     # We shape only when EE is not too far in XY to avoid weird gradients.
+    #     above_mask = (to_target[:, 2] > 0.0).float()
+    #     temp_z_above = 10.0
+    #     rew_above_z = above_mask * torch.exp(-temp_z_above * dist_z)
+
+    #     # ------------------------------------------------------------
+    #     # 2) Grasping / lifting proxy
+    #     # ------------------------------------------------------------
+    #     # Detect "lift": object COM height relative to environment origin
+    #     # Use the original (non-offset) Z position of object root as lift indicator
+    #     obj_root_pos_env = obj_root_pos - env_origins
+    #     obj_height = torch.nan_to_num(obj_root_pos_env[:, 2], nan=0.0, posinf=0.0, neginf=0.0)
+
+    #     # Assume initial/rest height is roughly constant; use a small margin above that.
+    #     # If env tracks an initial height, we could use it; otherwise, just use a minimal threshold.
+    #     # Here we use a fixed threshold.
+    #     lift_threshold = 0.06  # meters above table plane (approx)
+    #     lifted = (obj_height > lift_threshold).float()
+
+    #     # Lift reward: strong bonus for being lifted
+    #     rew_lift_raw = lifted
+
+    #     # Optional smooth shaping: small reward as it starts to lift above table
+    #     # Clamp height to a range to keep it stable
+    #     h_clamped = torch.clamp(obj_height, 0.0, 0.10)
+    #     temp_lift = 20.0
+    #     rew_lift_smooth = torch.exp(-temp_lift * (0.10 - h_clamped))  # near 0.10m → ~1
+
+    #     # Combine: strong sparse + smooth dense
+    #     rew_lift = 2.0 * rew_lift_raw + 0.5 * rew_lift_smooth
+
+    #     # ------------------------------------------------------------
+    #     # 3) Gripper closure when close (encourage grasp)
+    #     # ------------------------------------------------------------
+    #     # Encourage closing fingers when EE is near the object
+    #     # Define a proximity mask in 3D
+    #     proximity_radius = 0.05  # m
+    #     near_mask = (dist_3d < proximity_radius).float()
+
+    #     # Assume smaller finger distance => better (i.e., joint_pos larger or smaller depending on robot;
+    #     # we will simply encourage absolute position dev from mid-range to be small so it doesn't dominate).
+    #     # Here we just use negative norm of finger velocities to avoid jitter and slightly reward being still.
+    #     finger_vel = torch.nan_to_num(joint_vel[:, -finger_dofs:], nan=0.0, posinf=0.0, neginf=0.0)
+    #     finger_vel_norm = torch.linalg.norm(finger_vel, dim=-1)
+
+    #     temp_finger = 2.0
+    #     rew_finger_still = near_mask * torch.exp(-temp_finger * finger_vel_norm)
+
+    #     # ------------------------------------------------------------
+    #     # 4) Motion smoothness (small joint velocity)
+    #     # ------------------------------------------------------------
+    #     joint_vel_norm = torch.linalg.norm(joint_vel, dim=-1)
+    #     temp_smooth = 0.1
+    #     rew_smooth = torch.exp(-temp_smooth * joint_vel_norm)
+
+    #     # ------------------------------------------------------------
+    #     # 5) Global distance-to-target shaping
+    #     # ------------------------------------------------------------
+    #     temp_dist = 5.0
+    #     rew_dist = torch.exp(-temp_dist * dist_3d)
+
+    #     # ------------------------------------------------------------
+    #     # Weighted sum of reward components
+    #     # ------------------------------------------------------------
+    #     # Weights chosen heuristically to reach ~0.9 average task score when policy is good
+    #     w_xy       = 0.6
+    #     w_above_z  = 0.8
+    #     w_dist     = 0.4
+    #     w_lift     = 2.5
+    #     w_finger   = 0.3
+    #     w_smooth   = 0.1
+
+    #     reward = (
+    #         w_xy * rew_xy
+    #         + w_above_z * rew_above_z
+    #         + w_dist * rew_dist
+    #         + w_lift * rew_lift
+    #         + w_finger * rew_finger_still
+    #         + w_smooth * rew_smooth
+    #     )
+
+    #     # ------------------------------------------------------------
+    #     # Sanity: keep rewards finite and safe
+    #     # ------------------------------------------------------------
+    #     reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
+    #     assert torch.isfinite(reward).all(), "Non-finite reward encountered"
+
+    #     # Individual components for logging
+    #     individual_rewards = {
+    #         "rew_xy": torch.nan_to_num(rew_xy, nan=0.0, posinf=0.0, neginf=0.0),
+    #         "rew_above_z": torch.nan_to_num(rew_above_z, nan=0.0, posinf=0.0, neginf=0.0),
+    #         "rew_dist": torch.nan_to_num(rew_dist, nan=0.0, posinf=0.0, neginf=0.0),
+    #         "rew_lift": torch.nan_to_num(rew_lift, nan=0.0, posinf=0.0, neginf=0.0),
+    #         "rew_finger_still": torch.nan_to_num(rew_finger_still, nan=0.0, posinf=0.0, neginf=0.0),
+    #         "rew_smooth": torch.nan_to_num(rew_smooth, nan=0.0, posinf=0.0, neginf=0.0),
+    #     }
+
+    #     return reward
 
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -450,45 +618,58 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
             object.write_root_pose_to_sim(object_default_state[:, :7], env_ids)
             object.write_root_velocity_to_sim(object_default_state[:, 7:], env_ids)
 
+        hand_pos = self._robot.data.body_pos_w[env_ids, self.hand_link_idx]
+        hand_rot = self._robot.data.body_quat_w[env_ids, self.hand_link_idx]
+
+        self.robot_grasp_rot[env_ids], self.robot_grasp_pos[env_ids] = tf_combine(
+            hand_rot, hand_pos, self.robot_local_grasp_rot[env_ids], self.robot_local_grasp_pos[env_ids]
+        )
     
     def _get_observations(self) -> dict:
+        # object root is not bottom center of the object, the prim is at "/World/envs/env_0/{self.target_object_name}"
         dof_pos_scaled = (
             2.0
             * (self._robot.data.joint_pos - self.robot_dof_lower_limits)
             / (self.robot_dof_upper_limits - self.robot_dof_lower_limits)
             - 1.0
         )
-
-        # you can access the object size via self.target_object_size
+        target_object_pos=self.target_object.data.root_pos_w -self.scene.env_origins
+        target_object_pos[:,2] += self.target_object_size[2]
+        to_target = target_object_pos - self.robot_grasp_pos
         obs = torch.cat(
             (
                 dof_pos_scaled,
                 self._robot.data.joint_vel * self.cfg.dof_velocity_scale,
-                self.target_object.data.root_pos_w -self.scene.env_origins,
+                to_target,
                 self.target_object.data.root_quat_w,
             ),
             dim=-1,
         )
 
+
+
+
         return {"policy": torch.clamp(obs, -5.0, 5.0)}
 
     # auxiliary methods
-
+        # print(f"obs: {obs}")
+        # print(f"target_object_pos{target_object_pos}")
+        # print(f"robot_grasp_pos{self.robot_grasp_pos}")
+        # obj_root_pos_env = self.target_object.data.root_pos_w -self.scene.env_origins
+        # obj_height = torch.nan_to_num(obj_root_pos_env[:, 2], nan=0.0, posinf=0.0, neginf=0.0)
+        # print(obj_height)
 
     def _compute_rewards(
         self,
         actions,
         action_penalty_scale,
     ):
-        # distance from hand to the drawer
-        # print(f"cream_pos{self._cream_cheese.data.root_pose_w}")
-        # print(f"cream{cream_cheese_grasp_pos}") # check
-        # print(franka_grasp_pos)
 
 
 
 
-        actions_copy = torch.zeros_like(actions) * self.common_step_counter
+
+        actions_copy = torch.zeros_like(actions) * self.common_step_counter # disable
         # regularization on the actions (summed for each environment)
         action_penalty = torch.sum(actions_copy**2, dim=-1)
 
@@ -509,7 +690,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
 
 
     
-    def _get_rewards_eureka(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def _get_rewards_test(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         import torch
 
         device = self.device
@@ -834,10 +1015,10 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
             print(f"num_envs: {self.num_envs}")
         # 3. Determine state dimensions
         # robot
-        robot_pos_dim = len(self.episodes[0]["states"][0]["franka"]["pos"])      # 3
+        # robot_pos_dim = len(self.episodes[0]["states"][0]["franka"]["pos"])      # 3
 
         # actually I am not using this..
-        robot_rot_dim = len(self.episodes[0]["states"][0]["franka"]["rot"])      # 4
+        # robot_rot_dim = len(self.episodes[0]["states"][0]["franka"]["rot"])      # 4
         robot_dof_dim = len(self.episodes[0]["states"][0]["franka"]["dof_pos"])  # num_joints
 
         # rigid objects (all share same structure)
@@ -856,71 +1037,72 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
         padding_mask = torch.ones((self.num_envs, max_len), dtype=torch.bool)
 
         # 5. Fill tensors
-        for env_idx, ep in enumerate(self.episodes): # each episode
-            ep_len = lengths[env_idx]
+        with torch.inference_mode():
+            for env_idx, ep in enumerate(self.episodes): # each episode
+                ep_len = lengths[env_idx]
 
-            for t, state in enumerate(ep["states"]):
-                # robot
-                # robot_pos[env_idx, t] = torch.tensor(state["franka"]["pos"])
-                # robot_rot[env_idx, t] = torch.tensor(state["franka"]["rot"])
+                for t, state in enumerate(ep["states"]):
+                    # robot
+                    # robot_pos[env_idx, t] = torch.tensor(state["franka"]["pos"])
+                    # robot_rot[env_idx, t] = torch.tensor(state["franka"]["rot"])
 
-                dof_vals = [v[0] for v in state["franka"]["dof_pos"].values()]
-                dof_vals[-1] = - dof_vals[-1]
-                # print(dof_vals)
-                robot_dof[env_idx, t] = torch.tensor(dof_vals)
+                    dof_vals = [v[0] for v in state["franka"]["dof_pos"].values()]
+                    dof_vals[-1] = - dof_vals[-1]
+                    # print(dof_vals)
+                    robot_dof[env_idx, t] = torch.tensor(dof_vals)
 
-                # objects
+                    # objects
+                    for obj_name, obj_idx in self.object_indices.items():
+                        obj = state[obj_name]
+                        object_pos[env_idx, t, obj_idx] = torch.tensor(obj["pos"])
+                        object_rot[env_idx, t, obj_idx] = torch.tensor(obj["rot"])
+                # padding mask
+                padding_mask[env_idx, :ep_len] = False
+
+
+            # Next step: Set states, call reward function, log
+
+            for t in range(max_len):
+                # set states
+                joint_pos = robot_dof[:,t,:]
+                # print(joint_pos[0,-2:])
+                joint_vel = torch.zeros_like(joint_pos)
+                self._robot.write_joint_state_to_sim(joint_pos, joint_vel)
                 for obj_name, obj_idx in self.object_indices.items():
-                    obj = state[obj_name]
-                    object_pos[env_idx, t, obj_idx] = torch.tensor(obj["pos"])
-                    object_rot[env_idx, t, obj_idx] = torch.tensor(obj["rot"])
-            # padding mask
-            padding_mask[env_idx, :ep_len] = False
+                    object = self.rigid_objects[obj_name]
+                    object_state = torch.zeros((self.num_envs, 13), device=self.device)
+                    object_state[:,0:3] = object_pos[:,t,obj_idx,:] + self.scene.env_origins
+                    object_state[:,3:7] = object_rot[:,t,obj_idx,:]
+                    object.write_root_pose_to_sim(object_state[:, :7])
+                    object.write_root_velocity_to_sim(object_state[:, 7:])
+            
+            # similar to step function
+                self.scene.write_data_to_sim()
+                self.sim.step(render=True)
+                if t%2 ==0:
+                    self.sim.render()
+                self.scene.update(dt=self.physics_dt)
+                # import pdb
+                # pdb.set_trace()
+
+                # call reward function, should be from eureka
+                if hasattr(self, "_get_rewards_eureka"):
+                    # dict value size is equal to num of envs
+                    rewards_oracle = self._get_rewards_oracle()
+                    rewards_eureka, rewards_dict = self._get_rewards_eureka()
+                    rewards_oracle_replay =rewards_oracle[:num_episodes]
+                    rewards_eureka_replay = rewards_eureka[:num_episodes]
+                    rewards_dict_replay = { k: v[:num_episodes] for k, v in rewards_dict.items() }
+                    eureka_episode_sums["eureka_total_rewards"] += rewards_eureka_replay
+                    eureka_episode_sums["oracle_total_rewards"] += rewards_oracle_replay
+                    for key in rewards_dict_replay.keys():
+                        if key not in eureka_episode_sums:
+                            eureka_episode_sums[key] = torch.zeros(num_episodes, device=self.device)
+                        eureka_episode_sums[key] += rewards_dict_replay[key]
 
 
-        # Next step: Set states, call reward function, log
-
-        for t in range(max_len):
-            # set states
-            joint_pos = robot_dof[:,t,:]
-            # print(joint_pos[0,-2:])
-            joint_vel = torch.zeros_like(joint_pos)
-            self._robot.write_joint_state_to_sim(joint_pos, joint_vel)
-            for obj_name, obj_idx in self.object_indices.items():
-                object = self.rigid_objects[obj_name]
-                object_state = torch.zeros((self.num_envs, 13), device=self.device)
-                object_state[:,0:3] = object_pos[:,t,obj_idx,:] + self.scene.env_origins
-                object_state[:,3:7] = object_rot[:,t,obj_idx,:]
-                object.write_root_pose_to_sim(object_state[:, :7])
-                object.write_root_velocity_to_sim(object_state[:, 7:])
-           
-           # similar to step function
-            self.scene.write_data_to_sim()
-            self.sim.step(render=True)
-            if t%2 ==0:
-                self.sim.render()
-            self.scene.update(dt=self.physics_dt)
-            # import pdb
-            # pdb.set_trace()
-
-            # call reward function, should be from eureka
-            if hasattr(self, "_get_rewards_eureka"):
-                # dict value size is equal to num of envs
-                # rewards_oracle = self._get_rewards_oracle()
-                rewards_eureka, rewards_dict = self._get_rewards_eureka()
-                # rewards_oracle_replay =rewards_oracle[:num_episodes]
-                rewards_eureka_replay = rewards_eureka[:num_episodes]
-                rewards_dict_replay = { k: v[:num_episodes] for k, v in rewards_dict.items() }
-                eureka_episode_sums["eureka_total_rewards"] += rewards_eureka_replay
-                # eureka_episode_sums["oracle_total_rewards"] += rewards_oracle_replay
-                for key in rewards_dict_replay.keys():
-                    if key not in eureka_episode_sums:
-                        eureka_episode_sums[key] = torch.zeros(num_episodes, device=self.device)
-                    eureka_episode_sums[key] += rewards_dict_replay[key]
-
-
-                for k in eureka_episode_sums.keys():
-                    writer.add_scalar("Replay/"+k, eureka_episode_sums[k].mean().item(), t) 
+                    for k in eureka_episode_sums.keys():
+                        writer.add_scalar("Replay/"+k, eureka_episode_sums[k].mean().item(), t) 
 
 
 
@@ -929,5 +1111,5 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
 
 
             # env_ids = torch.arange(50, device=self.device, dtype=torch.long)
-            # self._reset_idx(env_ids)
+        self._reset_idx(env_ids)
 
