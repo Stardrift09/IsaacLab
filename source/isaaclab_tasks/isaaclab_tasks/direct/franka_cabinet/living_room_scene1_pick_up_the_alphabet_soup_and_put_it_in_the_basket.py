@@ -24,7 +24,7 @@ from isaaclab.utils.math import sample_uniform
 from torch.utils.tensorboard import SummaryWriter
 # from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 
-EUREKA_ROOT_DIR = "/home/shaotongchen/workspace_eureka/IsaacLabEureka"
+EUREKA_ROOT_DIR = "/home/admin_01/workspace_eureka/IsaacLabEureka"
 @configclass
 class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg):
     # env
@@ -131,7 +131,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg
         prim_path="/World/envs/env_.*/ketchup",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0.3, 0, 0], rot=[0.7071, 0.7071, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/ketchup/usd/ketchup.usd",
+            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/ketchup/usd/ketchup.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
@@ -143,7 +143,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg
         prim_path="/World/envs/env_.*/basket",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0, 0, 0], rot=[0, 0, 0, 1]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/basket/usd/basket.usd",
+            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/basket/usd/basket.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
@@ -155,7 +155,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg
         prim_path="/World/envs/env_.*/alphabet_soup",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0.2, 0.3, 0], rot=[0.7071, 0.7071, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/alphabet_soup/usd/alphabet_soup.usd",
+            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/alphabet_soup/usd/alphabet_soup.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
@@ -167,7 +167,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg
         prim_path="/World/envs/env_.*/cream_cheese",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0, 0.5, 0], rot=[0.7071, 0.7071, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/cream_cheese/usd/cream_cheese.usd",
+            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/cream_cheese/usd/cream_cheese.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
@@ -179,7 +179,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg
         prim_path="/World/envs/env_.*/tomato_sauce",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0.2, 0.5, 0], rot=[0.7071, 0.7071, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/tomato_sauce/usd/tomato_sauce.usd",
+            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/tomato_sauce/usd/tomato_sauce.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
@@ -222,7 +222,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
         self.target_region = "basket"
         self.input_direction = 2 # z axis
         super().__init__(cfg, render_mode, **kwargs)
-        self.log_dir = "/home/shaotongchen/workspace_eureka/IsaacLabEureka/logs/replay_test"
+        self.log_dir = "/home/admin_01/workspace_eureka/IsaacLabEureka/logs/replay_test"
         self.sample = self.episodes[0]["states"][0].copy()
         self.sample.pop("franka", None)
         

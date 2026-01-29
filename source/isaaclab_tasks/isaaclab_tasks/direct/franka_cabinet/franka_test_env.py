@@ -154,7 +154,7 @@ class FrankaTestEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/ketchup",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0.3, 1, 0], rot=[0.7071, 0.7071, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/ketchup/usd/ketchup.usd",
+            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/ketchup/usd/ketchup.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
@@ -166,7 +166,7 @@ class FrankaTestEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/basket",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0, 1, 0], rot=[0, 0, 0, 1]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/basket/usd/basket.usd",
+            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/basket/usd/basket.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
@@ -178,7 +178,7 @@ class FrankaTestEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/cream_cheese",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0.2, 0.7, 0], rot=[0.7071, 0.7071, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/cream_cheese/usd/cream_cheese.usd",
+            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/cream_cheese/usd/cream_cheese.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
@@ -190,7 +190,7 @@ class FrankaTestEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/alphabet_soup",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0, 0.5, 0], rot=[0.7071, 0.7071, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/alphabet_soup/usd/alphabet_soup.usd",
+            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/alphabet_soup/usd/alphabet_soup.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
@@ -202,7 +202,7 @@ class FrankaTestEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/tomato_sauce",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0.2, 0.5, 0], rot=[0.7071, 0.7071, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/shaotongchen/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/tomato_sauce/usd/tomato_sauce.usd",
+            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/tomato_sauce/usd/tomato_sauce.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
