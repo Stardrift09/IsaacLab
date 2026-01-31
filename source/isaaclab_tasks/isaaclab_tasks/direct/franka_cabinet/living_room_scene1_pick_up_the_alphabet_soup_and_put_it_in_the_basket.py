@@ -54,7 +54,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1024, env_spacing=3.0, replicate_physics=True, clone_in_fabric=True, 
+        num_envs=2048, env_spacing=3.0, replicate_physics=True, clone_in_fabric=True, 
     )
 
 
@@ -299,7 +299,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
         robot_local_grasp_pose_rot, robot_local_pose_pos = tf_combine(
             hand_pose_inv_rot, hand_pose_inv_pos, finger_pose[3:7], finger_pose[0:3]
         )
-        robot_local_pose_pos += torch.tensor([0, 0.04, 0], device=self.device)
+        # robot_local_pose_pos += torch.tensor([0, 0.04, 0], device=self.device)
 
         self.robot_local_grasp_pos = robot_local_pose_pos.repeat((self.num_envs, 1)) # 3
         self.robot_local_grasp_rot = robot_local_grasp_pose_rot.repeat((self.num_envs, 1)) # 4
@@ -310,6 +310,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
 
         self.robot_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
         self.robot_grasp_pos = torch.zeros((self.num_envs, 3), device=self.device)
+        self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
 
 
     def _setup_scene(self):
@@ -428,7 +429,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
             hand_rot, hand_pos, self.robot_local_grasp_rot, self.robot_local_grasp_pos
         )
 
-        terminated = self.target_object.data.root_pos_w[:, 2] > 0.6
+        terminated = self.target_object.data.root_pos_w[:, 2] > 0.4
         truncated = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, truncated
     
@@ -627,16 +628,17 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
         )
     
     def _get_observations(self) -> dict:
-        # object root is not bottom center of the object, the prim is at "/World/envs/env_0/{self.target_object_name}"
+        # object root is roughtly the center of the object
+        # If grasp keeps failing, consider if the robot closes gripper too early
+        # You may use the helper variable for any purpose, like counting time steps and decide if the hand ready for grasping.
+        # self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
         dof_pos_scaled = (
             2.0
             * (self._robot.data.joint_pos - self.robot_dof_lower_limits)
             / (self.robot_dof_upper_limits - self.robot_dof_lower_limits)
             - 1.0
         )
-        target_object_pos=self.target_object.data.root_pos_w -self.scene.env_origins
-        target_object_pos[:,2] += self.target_object_size[2]
-        to_target = target_object_pos - self.robot_grasp_pos
+        to_target = self.target_object.data.root_pos_w - self.robot_grasp_pos
         obs = torch.cat(
             (
                 dof_pos_scaled,
@@ -995,11 +997,13 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
 
 
     def run_replay(self):
+        env_ids = torch.arange(50, device=self.device, dtype=torch.long)
+        self._reset_idx(env_ids)
         # [num_envs, step, states]
         # first loop over, add padding, then stack.
         writer = SummaryWriter(self.log_dir)
         num_episodes = len(self.episodes)
-        env_ids = torch.arange(50, device=self.device, dtype=torch.long)
+
         eureka_episode_sums = dict()
         eureka_episode_sums["eureka_total_rewards"] = torch.zeros(num_episodes, device=self.device)
         eureka_episode_sums["oracle_total_rewards"] = torch.zeros(num_episodes, device=self.device)
