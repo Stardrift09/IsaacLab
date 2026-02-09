@@ -355,6 +355,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
         self.robot_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
         self.robot_grasp_pos = torch.zeros((self.num_envs, 3), device=self.device)
         self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
+        self.quat_desired = torch.tensor([0, 0, 0, 1], device=self.device).repeat(self.num_envs, 1)
 
 
     def _setup_scene(self):
@@ -549,9 +550,8 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
         self.target_to_hand_pos = self.target_object.data.root_pos_w - self.robot_grasp_pos
         hand_quat = self._robot.data.body_quat_w[:, self.hand_link_idx]
         q_hand_inv = quat_conjugate(hand_quat) # Does this reduce calculation?
-        quat_desired=torch.tensor([0, 0, 0, 1],device = self.device)
-        z_quat = quat_desired.repeat(self.num_envs,1)
-        self.quat = quat_mul(z_quat,q_hand_inv)
+
+        self.quat = quat_mul(self.quat_desired,q_hand_inv)
         # reward = quat[:,1] Forcing the second element to be close 1 to point downwards, just for reference #TODO:should be 0 and 3 be 0
 
         self.site_to_target_pos = self.target_site.data.root_pos_w - self.target_object.data.root_pos_w
@@ -616,6 +616,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
 
         # 2. Compute max episode length
         lengths = [len(ep["states"]) for ep in self.episodes]
+        lengths_tensor = torch.tensor(lengths,device=self.device)
         # if self.debug:
             # print(lengths)
         max_len = max(lengths)
@@ -697,13 +698,16 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
                 # call reward function, should be from eureka
                 if hasattr(self, "_get_rewards_eureka"):
                     # dict value size is equal to num of envs
-                    rewards_oracle = self._get_rewards_oracle()
+                    # rewards_oracle = self._get_rewards_oracle()
                     rewards_eureka, rewards_dict = self._get_rewards_eureka()
-                    rewards_oracle_replay =rewards_oracle[:num_episodes]
+                    mask = padding_mask[:, t]
+                    for k, v in rewards_dict.items(): # if episode ends, the value should be zero
+                        v.masked_fill_(mask, 0.0)
+                    # rewards_oracle_replay =rewards_oracle[:num_episodes]
                     rewards_eureka_replay = rewards_eureka[:num_episodes]
                     rewards_dict_replay = { k: v[:num_episodes] for k, v in rewards_dict.items() }
                     eureka_episode_sums["eureka_total_rewards"] += rewards_eureka_replay
-                    eureka_episode_sums["oracle_total_rewards"] += rewards_oracle_replay
+                    # eureka_episode_sums["oracle_total_rewards"] += rewards_oracle_replay
                     for key in rewards_dict_replay.keys():
                         if key not in eureka_episode_sums:
                             eureka_episode_sums[key] = torch.zeros(num_episodes, device=self.device)
