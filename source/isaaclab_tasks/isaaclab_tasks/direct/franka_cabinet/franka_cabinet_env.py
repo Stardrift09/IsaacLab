@@ -250,9 +250,9 @@ class FrankaCabinetEnv(DirectRLEnv):
         self.hand_link_idx = self._robot.find_bodies("panda_link7")[0][0]
         self.left_finger_link_idx = self._robot.find_bodies("panda_leftfinger")[0][0]
         self.right_finger_link_idx = self._robot.find_bodies("panda_rightfinger")[0][0]
-        self.drawer_link_idx = self._cabinet.find_bodies("drawer_top")[0][0] # body index is different from joint index
-        self.drawer_top_idx = self._cabinet.find_joints("drawer_top_joint")[0] # joint index
-        
+        self.drawer_link_idx = self._cabinet.find_bodies("drawer_top")[0][0]
+        self.drawer_joint_idx = self._cabinet.find_joints("drawer_top_joint")[0][0]
+
         self.robot_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
         self.robot_grasp_pos = torch.zeros((self.num_envs, 3), device=self.device)
         self.drawer_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
@@ -369,8 +369,8 @@ class FrankaCabinetEnv(DirectRLEnv):
                 dof_pos_scaled,
                 self._robot.data.joint_vel * self.cfg.dof_velocity_scale,
                 to_target,
-                self._cabinet.data.joint_pos[:, 1].unsqueeze(-1),
-                self._cabinet.data.joint_vel[:, 1].unsqueeze(-1),
+                self._cabinet.data.joint_pos[:, self.drawer_joint_idx].unsqueeze(-1),
+                self._cabinet.data.joint_vel[:, self.drawer_joint_idx].unsqueeze(-1),
             ),
             dim=-1,
         )
@@ -468,7 +468,7 @@ class FrankaCabinetEnv(DirectRLEnv):
         action_penalty = torch.sum(actions**2, dim=-1)
 
         # how far the cabinet has been opened out
-        open_reward = cabinet_dof_pos[:, 1]  # drawer_top_joint
+        open_reward = cabinet_dof_pos[:, self.drawer_joint_idx]  # drawer_top_joint
 
         # penalty for distance of each finger from the drawer handle
         lfinger_dist = franka_lfinger_pos[:, 2] - drawer_grasp_pos[:, 2]
@@ -496,9 +496,10 @@ class FrankaCabinetEnv(DirectRLEnv):
         }
 
         # bonus for opening drawer properly
-        rewards = torch.where(cabinet_dof_pos[:, 1] > 0.01, rewards + 0.25, rewards)
-        rewards = torch.where(cabinet_dof_pos[:, 1] > 0.2, rewards + 0.25, rewards)
-        rewards = torch.where(cabinet_dof_pos[:, 1] > 0.35, rewards + 0.25, rewards)
+        drawer_pos = cabinet_dof_pos[:, self.drawer_joint_idx]
+        rewards = torch.where(drawer_pos > 0.01, rewards + 0.25, rewards)
+        rewards = torch.where(drawer_pos > 0.2, rewards + 0.25, rewards)
+        rewards = torch.where(drawer_pos > 0.35, rewards + 0.25, rewards)
 
         return rewards
 

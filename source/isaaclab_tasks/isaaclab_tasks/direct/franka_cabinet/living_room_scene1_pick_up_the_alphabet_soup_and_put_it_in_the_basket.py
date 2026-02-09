@@ -20,11 +20,10 @@ from isaaclab.sim.utils.stage import get_current_stage
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
-from isaaclab.utils.math import sample_uniform
+from isaaclab.utils.math import sample_uniform, quat_inv, quat_mul, transform_points, quat_conjugate, quat_apply
 from torch.utils.tensorboard import SummaryWriter
 # from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 
-EUREKA_ROOT_DIR = "/home/admin_01/workspace_eureka/IsaacLabEureka"
 @configclass
 class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg):
     # env
@@ -36,7 +35,9 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg
     # train_with_isaaclab =True
 
     # if train_with_isaaclab:
-    path = f"{EUREKA_ROOT_DIR}/libero/trajs/libero90/libero_90_living_room_scene1_pick_up_the_alphabet_soup_and_put_it_in_the_basket_traj_v2.pkl"
+    from isaaclab_eureka.utils import eureka_root_dir
+    root = eureka_root_dir()
+    path = f"{root}/libero/trajs/libero90/libero_90_living_room_scene1_pick_up_the_alphabet_soup_and_put_it_in_the_basket_traj_v2.pkl"
     # else:
     #     path = "libero/trajs/libero90/libero_90_living_room_scene1_pick_up_the_alphabet_soup_and_put_it_in_the_basket_traj_v2.pkl"
     # simulation
@@ -213,16 +214,16 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
     def __init__(self, cfg: LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg, render_mode: str | None = None, **kwargs):
         self.debug = False  
         self.path = cfg.path # scene init is called in super
+        self.root = cfg.root
         from isaaclab_eureka.utils import read_pkl
         self.data = read_pkl(self.path) 
         # [num_envs, step, states]
         # first loop over, add padding, then stack.
         self.episodes = self.data["franka"]
         self.target_object_name = "alphabet_soup"
-        self.target_region = "basket"
+        self.target_site_name = "basket"
         self.input_direction = 2 # z axis
         super().__init__(cfg, render_mode, **kwargs)
-        self.log_dir = "/home/admin_01/workspace_eureka/IsaacLabEureka/logs/replay_test"
         self.sample = self.episodes[0]["states"][0].copy()
         self.sample.pop("franka", None)
         
@@ -233,9 +234,6 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
 
         # expose the following to llm
         # self.task_type = "placement"
-
-
-        
 
         def get_env_local_pose(env_pos: torch.Tensor, xformable: UsdGeom.Xformable, device: torch.device):
             """Compute pose in env-local coordinates"""
@@ -268,11 +266,57 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
         stage = get_current_stage()
 
         prim = stage.GetPrimAtPath(f"/World/envs/env_0/{self.target_object_name}")
-
         bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default"]).ComputeWorldBound(prim)
+        min_corner = bbox.GetRange().GetMin()
+        max_corner = bbox.GetRange().GetMax()
+        self.target_object_size = torch.tensor((max_corner - min_corner), device=self.device)
+        local_corners = torch.tensor([
+            [min_corner[0], min_corner[1], min_corner[2]],
+            [max_corner[0], min_corner[1], min_corner[2]],
+            [min_corner[0], max_corner[1], min_corner[2]],
+            [min_corner[0], min_corner[1], max_corner[2]],
+            [max_corner[0], max_corner[1], min_corner[2]],
+            [max_corner[0], min_corner[1], max_corner[2]],
+            [min_corner[0], max_corner[1], max_corner[2]],
+            [max_corner[0], max_corner[1], max_corner[2]],
+        ], device=self.device)
+        local_corners -= self.scene.env_origins[0,:]
+        self.local_corners_init = local_corners.unsqueeze(0).repeat(self.num_envs, 1, 1)
+        self.local_corners_target_obj = torch.zeros_like(self.local_corners_init,device=self.device)
+        self.local_world_corners_target_obj = torch.zeros_like(self.local_corners_init,device=self.device)
+        self.quat = torch.zeros([self.num_envs, 4],device=self.device)
+        self.target_to_hand_pos = torch.zeros((self.num_envs, 3),device=self.device) # relative position
+        self.site_to_target_pos = torch.zeros((self.num_envs, 3),device=self.device) # relative position
+
+        if self.debug:
+            pos = self.target_object.data.root_pos_w - self.scene.env_origins
+            quat_1=torch.tensor([0.7071, 0.7071, 0, 0],device = self.device) # x
+            quat_2=torch.tensor([0.7071, 0, 0, 0.7071],device = self.device) # z
+            quat_3=torch.tensor([0.7071, 0, 0.7071, 0],device = self.device) # y
+            quat = self.target_object.data.root_quat_w
+            quat[-1,:] = quat_mul(quat_2, self.target_object.data.root_quat_w[-1,:])
+            local_corners_target_obj = transform_points(points=self.local_corners_init,
+                                                pos=pos,
+                                                quat=quat)
+            quat_1_inv = quat_inv(quat_1)
+            target_to_hand_rot = quat_mul(quat_1, quat_1_inv)
+            import pdb
+            pdb.set_trace()
+
+        prim = stage.GetPrimAtPath(f"/World/envs/env_0/{self.target_site_name}")
+        bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default"]).ComputeLocalBound(prim)
         min_corner = bbox.GetRange().GetMin()  # Vec3
         max_corner = bbox.GetRange().GetMax()  # Vec3
-        self.target_object_size = torch.tensor((max_corner - min_corner), device=self.device)
+        target_site_size = torch.tensor((max_corner - min_corner), device=self.device)
+        obj_xy_extent = self.target_object_size[:2].min()
+        site_xy_extent = target_site_size[:2].max()
+        # half extents
+        obj_half = 0.5 * obj_xy_extent
+        site_half = 0.5 * site_xy_extent
+        self.target_site_radius = site_half - obj_half
+        if self.target_site_radius.item() < 0:
+            self.target_site_radius = torch.tensor(0.02)
+
 
 
         hand_pose = get_env_local_pose(
@@ -378,7 +422,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
                     rot=init_states[k]["rot"],
                 ),
                 spawn=sim_utils.UsdFileCfg(
-                    usd_path=f"{EUREKA_ROOT_DIR}/libero/COMMON/stable_hope_objects/{k}/usd/{k}.usd",
+                    usd_path=f"{self.root}/libero/COMMON/stable_hope_objects/{k}/usd/{k}.usd",
                     rigid_props=sim_utils.RigidBodyPropertiesCfg(),
                     articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                         articulation_enabled=False
@@ -390,8 +434,8 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
             self.scene.rigid_objects[k] = object # can I directly assign the dict?
 
 
-            
         self.target_object : RigidObject = self.rigid_objects[self.target_object_name]
+        self.target_site = self.rigid_objects[self.target_site_name]
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
@@ -428,169 +472,26 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
         self.robot_grasp_rot, self.robot_grasp_pos = tf_combine(
             hand_rot, hand_pos, self.robot_local_grasp_rot, self.robot_local_grasp_pos
         )
+        # update obj corners
+        pos = self.target_object.data.root_pos_w - self.scene.env_origins
+        self.local_corners_target_obj = transform_points(points=self.local_corners_init,
+                                              pos=pos,
+                                              quat=self.target_object.data.root_quat_w)
 
-        terminated = self.target_object.data.root_pos_w[:, 2] > 0.4
+        # condition for termination
+        low_enough = self.target_object.data.root_pos_w[:, 2] <0.1
+        obj_xy = self.target_object.data.root_pos_w[:, :2]
+        site_pos = self.target_site.data.root_pos_w[:, :2]
+        dist2 = ((obj_xy - site_pos)**2).sum(dim=-1)
+        inside_site = dist2 < self.target_site_radius**2
+        terminated = inside_site & low_enough
+        # terminated = self.target_object.data.root_pos_w[:, 2] > 0.4
         truncated = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, truncated
     
     def _get_rewards(self) -> torch.Tensor:
 
         return self._compute_rewards(self.actions,self.cfg.action_penalty_scale,)
-
-    # def _get_rewards(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    #     # All tensors on the correct device
-    #     device = self.device
-    #     eps = 1e-6
-
-    #     # ------------------------------------------------------------
-    #     # Retrieve and sanitize useful state variables
-    #     # ------------------------------------------------------------
-    #     # End-effector / grasp pose
-    #     ee_pos = torch.nan_to_num(self.robot_grasp_pos, nan=0.0, posinf=0.0, neginf=0.0)
-
-    #     # Object pose (use the same computation as in observations)
-    #     obj_root_pos = torch.nan_to_num(self.target_object.data.root_pos_w, nan=0.0, posinf=0.0, neginf=0.0)
-    #     env_origins = torch.nan_to_num(self.scene.env_origins, nan=0.0, posinf=0.0, neginf=0.0)
-
-    #     # Compute object top position in environment frame (same as obs)
-    #     target_object_root = obj_root_pos - env_origins
-    #     target_object_root = torch.nan_to_num(target_object_root, nan=0.0, posinf=0.0, neginf=0.0)
-    #     target_object_root[:, 2] += float(self.target_object_size[2])
-
-    #     # Relative pose: vector from EE to object top
-    #     to_target = torch.nan_to_num(target_object_root - ee_pos, nan=0.0, posinf=0.0, neginf=0.0)
-
-    #     # Object quaternion
-    #     obj_quat = torch.nan_to_num(self.target_object.data.root_quat_w, nan=0.0, posinf=0.0, neginf=0.0)
-
-    #     # Joint info
-    #     joint_pos = torch.nan_to_num(self._robot.data.joint_pos, nan=0.0, posinf=0.0, neginf=0.0)
-    #     joint_vel = torch.nan_to_num(self._robot.data.joint_vel, nan=0.0, posinf=0.0, neginf=0.0)
-
-    #     # Optionally: gripper (assuming last one or two DOFs are fingers; guard with slicing)
-    #     # If not applicable, these terms will be very small and not dominate.
-    #     finger_dofs = 2
-    #     if joint_pos.shape[1] >= finger_dofs:
-    #         finger_pos = joint_pos[:, -finger_dofs:]
-    #     else:
-    #         finger_pos = torch.zeros((self.num_envs, finger_dofs), device=device)
-
-    #     # ------------------------------------------------------------
-    #     # Helper norms
-    #     # ------------------------------------------------------------
-    #     dist_xy = torch.linalg.norm(to_target[:, :2], dim=-1)            # horizontal distance
-    #     dist_z  = torch.abs(to_target[:, 2])                             # vertical offset
-
-    #     # Distance from EE to object top in 3D
-    #     dist_3d = torch.linalg.norm(to_target, dim=-1)
-
-    #     # ------------------------------------------------------------
-    #     # 1) Approach from above: encourage being above object and aligned in XY
-    #     # ------------------------------------------------------------
-    #     # Want EE directly above object: small XY distance, positive Z offset
-    #     # XY reward (exponential, bounded in [0,1]):
-    #     temp_xy = 5.0  # temperature for XY distance shaping
-    #     rew_xy = torch.exp(-temp_xy * dist_xy)
-
-    #     # Z-from-above reward: positive when EE is above object top, zero/negative otherwise
-    #     # We shape only when EE is not too far in XY to avoid weird gradients.
-    #     above_mask = (to_target[:, 2] > 0.0).float()
-    #     temp_z_above = 10.0
-    #     rew_above_z = above_mask * torch.exp(-temp_z_above * dist_z)
-
-    #     # ------------------------------------------------------------
-    #     # 2) Grasping / lifting proxy
-    #     # ------------------------------------------------------------
-    #     # Detect "lift": object COM height relative to environment origin
-    #     # Use the original (non-offset) Z position of object root as lift indicator
-    #     obj_root_pos_env = obj_root_pos - env_origins
-    #     obj_height = torch.nan_to_num(obj_root_pos_env[:, 2], nan=0.0, posinf=0.0, neginf=0.0)
-
-    #     # Assume initial/rest height is roughly constant; use a small margin above that.
-    #     # If env tracks an initial height, we could use it; otherwise, just use a minimal threshold.
-    #     # Here we use a fixed threshold.
-    #     lift_threshold = 0.06  # meters above table plane (approx)
-    #     lifted = (obj_height > lift_threshold).float()
-
-    #     # Lift reward: strong bonus for being lifted
-    #     rew_lift_raw = lifted
-
-    #     # Optional smooth shaping: small reward as it starts to lift above table
-    #     # Clamp height to a range to keep it stable
-    #     h_clamped = torch.clamp(obj_height, 0.0, 0.10)
-    #     temp_lift = 20.0
-    #     rew_lift_smooth = torch.exp(-temp_lift * (0.10 - h_clamped))  # near 0.10m → ~1
-
-    #     # Combine: strong sparse + smooth dense
-    #     rew_lift = 2.0 * rew_lift_raw + 0.5 * rew_lift_smooth
-
-    #     # ------------------------------------------------------------
-    #     # 3) Gripper closure when close (encourage grasp)
-    #     # ------------------------------------------------------------
-    #     # Encourage closing fingers when EE is near the object
-    #     # Define a proximity mask in 3D
-    #     proximity_radius = 0.05  # m
-    #     near_mask = (dist_3d < proximity_radius).float()
-
-    #     # Assume smaller finger distance => better (i.e., joint_pos larger or smaller depending on robot;
-    #     # we will simply encourage absolute position dev from mid-range to be small so it doesn't dominate).
-    #     # Here we just use negative norm of finger velocities to avoid jitter and slightly reward being still.
-    #     finger_vel = torch.nan_to_num(joint_vel[:, -finger_dofs:], nan=0.0, posinf=0.0, neginf=0.0)
-    #     finger_vel_norm = torch.linalg.norm(finger_vel, dim=-1)
-
-    #     temp_finger = 2.0
-    #     rew_finger_still = near_mask * torch.exp(-temp_finger * finger_vel_norm)
-
-    #     # ------------------------------------------------------------
-    #     # 4) Motion smoothness (small joint velocity)
-    #     # ------------------------------------------------------------
-    #     joint_vel_norm = torch.linalg.norm(joint_vel, dim=-1)
-    #     temp_smooth = 0.1
-    #     rew_smooth = torch.exp(-temp_smooth * joint_vel_norm)
-
-    #     # ------------------------------------------------------------
-    #     # 5) Global distance-to-target shaping
-    #     # ------------------------------------------------------------
-    #     temp_dist = 5.0
-    #     rew_dist = torch.exp(-temp_dist * dist_3d)
-
-    #     # ------------------------------------------------------------
-    #     # Weighted sum of reward components
-    #     # ------------------------------------------------------------
-    #     # Weights chosen heuristically to reach ~0.9 average task score when policy is good
-    #     w_xy       = 0.6
-    #     w_above_z  = 0.8
-    #     w_dist     = 0.4
-    #     w_lift     = 2.5
-    #     w_finger   = 0.3
-    #     w_smooth   = 0.1
-
-    #     reward = (
-    #         w_xy * rew_xy
-    #         + w_above_z * rew_above_z
-    #         + w_dist * rew_dist
-    #         + w_lift * rew_lift
-    #         + w_finger * rew_finger_still
-    #         + w_smooth * rew_smooth
-    #     )
-
-    #     # ------------------------------------------------------------
-    #     # Sanity: keep rewards finite and safe
-    #     # ------------------------------------------------------------
-    #     reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
-    #     assert torch.isfinite(reward).all(), "Non-finite reward encountered"
-
-    #     # Individual components for logging
-    #     individual_rewards = {
-    #         "rew_xy": torch.nan_to_num(rew_xy, nan=0.0, posinf=0.0, neginf=0.0),
-    #         "rew_above_z": torch.nan_to_num(rew_above_z, nan=0.0, posinf=0.0, neginf=0.0),
-    #         "rew_dist": torch.nan_to_num(rew_dist, nan=0.0, posinf=0.0, neginf=0.0),
-    #         "rew_lift": torch.nan_to_num(rew_lift, nan=0.0, posinf=0.0, neginf=0.0),
-    #         "rew_finger_still": torch.nan_to_num(rew_finger_still, nan=0.0, posinf=0.0, neginf=0.0),
-    #         "rew_smooth": torch.nan_to_num(rew_smooth, nan=0.0, posinf=0.0, neginf=0.0),
-    #     }
-
-    #     return reward
 
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -626,25 +527,44 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
         self.robot_grasp_rot[env_ids], self.robot_grasp_pos[env_ids] = tf_combine(
             hand_rot, hand_pos, self.robot_local_grasp_rot[env_ids], self.robot_local_grasp_pos[env_ids]
         )
-    
+
+        # update obj corners
+        pos = self.target_object.data.root_pos_w[env_ids] - self.scene.env_origins[env_ids]
+        self.local_corners_target_obj[env_ids] = transform_points(points=self.local_corners_init[env_ids],
+                                              pos=pos,
+                                              quat=self.target_object.data.root_quat_w[env_ids])
+        
+
+
     def _get_observations(self) -> dict:
-        # object root is roughtly the center of the object
-        # If grasp keeps failing, consider if the robot closes gripper too early
-        # You may use the helper variable for any purpose, like counting time steps and decide if the hand ready for grasping.
+        # target object pos is at the center, site center is at the bottom.
         # self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
+        # self.rigid_objects is a list with all RigidObject, you can use it to calculate AABBs.
         dof_pos_scaled = (
             2.0
             * (self._robot.data.joint_pos - self.robot_dof_lower_limits)
             / (self.robot_dof_upper_limits - self.robot_dof_lower_limits)
             - 1.0
         )
-        to_target = self.target_object.data.root_pos_w - self.robot_grasp_pos
+        self.target_to_hand_pos = self.target_object.data.root_pos_w - self.robot_grasp_pos
+        hand_quat = self._robot.data.body_quat_w[:, self.hand_link_idx]
+        q_hand_inv = quat_conjugate(hand_quat) # Does this reduce calculation?
+        quat_desired=torch.tensor([0, 0, 0, 1],device = self.device)
+        z_quat = quat_desired.repeat(self.num_envs,1)
+        self.quat = quat_mul(z_quat,q_hand_inv)
+        # reward = quat[:,1] Forcing the second element to be close 1 to point downwards, just for reference #TODO:should be 0 and 3 be 0
+
+        self.site_to_target_pos = self.target_site.data.root_pos_w - self.target_object.data.root_pos_w
+        self.local_world_corners_target_obj = self.local_corners_target_obj + self.target_object.data.root_pos_w.unsqueeze(1)
+        local_world_corners_target_obj =  self.local_corners_target_obj.reshape(self.local_corners_target_obj.shape[0], -1)
         obs = torch.cat(
             (
                 dof_pos_scaled,
                 self._robot.data.joint_vel * self.cfg.dof_velocity_scale,
-                to_target,
-                self.target_object.data.root_quat_w,
+                local_world_corners_target_obj, # eight corners of the target object in local world coordinate
+                self.target_to_hand_pos, # relative position
+                self.site_to_target_pos, # relative position
+                self.quat,
             ),
             dim=-1,
         )
@@ -654,31 +574,16 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
 
         return {"policy": torch.clamp(obs, -5.0, 5.0)}
 
-    # auxiliary methods
-        # print(f"obs: {obs}")
-        # print(f"target_object_pos{target_object_pos}")
-        # print(f"robot_grasp_pos{self.robot_grasp_pos}")
-        # obj_root_pos_env = self.target_object.data.root_pos_w -self.scene.env_origins
-        # obj_height = torch.nan_to_num(obj_root_pos_env[:, 2], nan=0.0, posinf=0.0, neginf=0.0)
-        # print(obj_height)
 
     def _compute_rewards(
         self,
         actions,
         action_penalty_scale,
     ):
-
-
-
-
-
+    
         actions_copy = torch.zeros_like(actions) * self.common_step_counter # disable
         # regularization on the actions (summed for each environment)
         action_penalty = torch.sum(actions_copy**2, dim=-1)
-
-
-
-
         rewards = (
             - action_penalty_scale * action_penalty
         )
@@ -692,317 +597,16 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
 
 
 
-    
-    def _get_rewards_test(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        import torch
-
-        device = self.device
-        num_envs = self.num_envs
-        eps = 1e-6
-
-        # ----------------------------------------------------------------------
-        # DESIGN ANALYSIS (from previous run)
-        # ----------------------------------------------------------------------
-        # task_score      : always ~0 → policy never actually lifts / succeeds.
-        # r_approach      : grows nicely, optimized.
-        # r_xy_align      : grows nicely, optimized.
-        # r_hover         : small but non-zero, optimized.
-        # r_orient        : identically 0 → gating too strict / never active.
-        # r_grasp_pose    : almost 0 → conditions too strict or unreachable.
-        # r_close_gripper : ~0 → conditions too strict; policy never gets signal.
-        # r_grasp_lift    : 0 → no meaningful object lifting/contact signal.
-        # r_no_push       : huge (~60) and flat → dominates and is uninformative.
-        # r_smooth        : huge (~60) and flat → dominates and is uninformative.
-        # r_obj_stable    : tiny → irrelevant.
-        #
-        # Net effect: total reward dominated by r_no_push + r_smooth, which the
-        # agent gets "for free" without interacting with the object. All real
-        # task-related components are tiny or dead → no learning of grasp/lift.
-        #
-        # NEW STRATEGY:
-        #  - Completely remove r_no_push and old r_smooth background bonuses.
-        #  - Simplify and strengthen shaping towards top-down grasp and lift:
-        #      1) Approach object center.
-        #      2) Align EE above object (XY and Z hover).
-        #      3) Encourage vertical (top-down) orientation using a smooth term.
-        #      4) Encourage moving down to grasp height once above object.
-        #      5) Encourage gripper closing when near object.
-        #      6) Strong dense reward on object height (pick up).
-        #  - Keep scales small (≈0–2 per component) and comparable.
-        #  - Mild smoothness penalty only (no giant constant bonuses).
-        # ----------------------------------------------------------------------
-
-        # ----------------------------------------------------------------------
-        # Fetch and sanitize state
-        # ----------------------------------------------------------------------
-        # End-effector pose: try dedicated ee_state if available
-        if hasattr(self._robot.data, "ee_state_w"):
-            ee_state = torch.nan_to_num(
-                self._robot.data.ee_state_w, nan=0.0, posinf=0.0, neginf=0.0
-            )
-            ee_pos = ee_state[..., 0:3]
-            ee_quat = ee_state[..., 3:7]
-        elif hasattr(self._robot.data, "root_pos_w") and hasattr(self._robot.data, "root_quat_w"):
-            ee_pos = torch.nan_to_num(
-                self._robot.data.root_pos_w, nan=0.0, posinf=0.0, neginf=0.0
-            )
-            ee_quat = torch.nan_to_num(
-                self._robot.data.root_quat_w, nan=0.0, posinf=0.0, neginf=0.0
-            )
-        else:
-            ee_pos = torch.zeros((num_envs, 3), device=device)
-            ee_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).repeat(num_envs, 1)
-
-        # Object pose / size / velocity
-        obj_pos = torch.nan_to_num(
-            self.target_object.data.root_pos_w, nan=0.0, posinf=0.0, neginf=0.0
-        )
-        obj_quat = torch.nan_to_num(
-            self.target_object.data.root_quat_w, nan=0.0, posinf=0.0, neginf=0.0
-        )
-        obj_linvel = torch.nan_to_num(
-            self.target_object.data.root_lin_vel_w, nan=0.0, posinf=0.0, neginf=0.0
-        )
-
-        obj_size = torch.nan_to_num(
-            self.target_object_size, nan=0.0, posinf=0.0, neginf=0.0
-        )
-        obj_half_height = 0.5 * obj_size[..., 2]
-
-        # Robot joint velocities
-        dof_vel = torch.nan_to_num(
-            self._robot.data.joint_vel, nan=0.0, posinf=0.0, neginf=0.0
-        )
-        vel_scale = getattr(self.cfg, "dof_velocity_scale", 1.0)
-        dof_vel_scaled = dof_vel * vel_scale
-
-        # Gripper width if available (for closing encouragement)
-        if hasattr(self._robot.data, "gripper_width"):
-            gripper_width = torch.nan_to_num(
-                self._robot.data.gripper_width, nan=0.0, posinf=0.0, neginf=0.0
-            )
-            if gripper_width.ndim == 0:
-                gripper_width = gripper_width.expand(num_envs)
-        else:
-            gripper_width = torch.zeros((num_envs,), device=device)
-
-        # Contact force on object as proxy for grasp contact (if available)
-        if hasattr(self.target_object.data, "contact_force_body"):
-            contact_force = torch.nan_to_num(
-                self.target_object.data.contact_force_body, nan=0.0, posinf=0.0, neginf=0.0
-            )
-            obj_contact_mag = torch.linalg.norm(
-                contact_force.view(num_envs, -1), dim=-1
-            )
-        else:
-            obj_contact_mag = torch.zeros((num_envs,), device=device)
-
-        # ----------------------------------------------------------------------
-        # Geometric helpers
-        # ----------------------------------------------------------------------
-        ee_to_obj = ee_pos - obj_pos
-        ee_to_obj = torch.nan_to_num(ee_to_obj, nan=0.0, posinf=0.0, neginf=0.0)
-
-        ee_obj_dist = torch.linalg.norm(ee_to_obj, dim=-1)
-
-        ee_to_obj_xy = ee_to_obj.clone()
-        ee_to_obj_xy[..., 2] = 0.0
-        ee_obj_xy_dist = torch.linalg.norm(ee_to_obj_xy, dim=-1)
-
-        obj_height = obj_pos[..., 2]
-        obj_speed = torch.linalg.norm(obj_linvel, dim=-1)
-
-        dof_vel_norm = torch.linalg.norm(dof_vel_scaled, dim=-1)
-
-        # Extract EE z-axis in world from quaternion
-        qw, qx, qy, qz = ee_quat.unbind(-1)
-        ee_z_world_x = 2.0 * (qx * qz + qw * qy)
-        ee_z_world_y = 2.0 * (qy * qz - qw * qx)
-        ee_z_world_z = 1.0 - 2.0 * (qx * qx + qy * qy)
-        ee_z_axis = torch.stack((ee_z_world_x, ee_z_world_y, ee_z_world_z), dim=-1)
-        ee_z_axis = torch.nan_to_num(ee_z_axis, nan=0.0, posinf=0.0, neginf=0.0)
-        ee_z_axis = ee_z_axis / (torch.linalg.norm(ee_z_axis, dim=-1, keepdim=True) + eps)
-
-        world_down = torch.tensor([0.0, 0.0, -1.0], device=device).view(1, 3)
-        cos_down = torch.sum(ee_z_axis * world_down, dim=-1).clamp(-1.0, 1.0)
-
-        # Some useful heights
-        table_height = torch.zeros((num_envs,), device=device)  # assume 0 as baseline
-        obj_top = obj_height + obj_half_height
-
-        # ----------------------------------------------------------------------
-        # Reward components – all scaled to ~[0, 1.5] range
-        # ----------------------------------------------------------------------
-
-        # 1) Approach object center (global shaping)
-        #    Encourage reducing full 3D distance independent of orientation.
-        approach_temp = 3.0
-        r_approach = torch.exp(-approach_temp * ee_obj_dist)
-        r_approach = torch.nan_to_num(r_approach, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # 2) XY alignment above object (top-down strategy)
-        #    Stronger shaping in XY once reasonably close in 3D.
-        xy_temp = 40.0
-        r_xy_align = torch.exp(-xy_temp * (ee_obj_xy_dist ** 2))
-        r_xy_align = torch.nan_to_num(r_xy_align, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # 3) Hover above object: EE a bit above object top, *not* below (to avoid pushing)
-        hover_margin = 0.05  # 5 cm above top
-        desired_hover_z = obj_top + hover_margin
-        ee_above_hover = ee_pos[..., 2] - desired_hover_z  # positive = above
-
-        # Penalize being below desired hover height, but only when XY is close
-        hover_xy_thresh = 0.10
-        near_xy_for_hover = (ee_obj_xy_dist < hover_xy_thresh).float()
-
-        hover_z_temp = 40.0
-        hover_z_deficit = torch.clamp(-ee_above_hover, min=0.0)
-        r_hover = torch.exp(-hover_z_temp * (hover_z_deficit ** 2)) * near_xy_for_hover
-        r_hover = torch.nan_to_num(r_hover, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # 4) Top-down orientation: smoothly encourage EE z-axis to point down,
-        #    especially when near object (no hard gate that kills gradient).
-        orient_temp = 5.0
-        near_orient_dist = 0.25
-        near_obj_orient_w = torch.exp(
-            -orient_temp * torch.clamp(ee_obj_dist - near_orient_dist, min=0.0)
-        )
-        near_obj_orient_w = torch.nan_to_num(
-            near_obj_orient_w, nan=0.0, posinf=0.0, neginf=0.0
-        )
-
-        # Reward goes from ~0 at cos_down=-1 to 1 at cos_down=1
-        orient_shape_temp = 3.0
-        r_orient = torch.exp(orient_shape_temp * (cos_down - 1.0)) * near_obj_orient_w
-        r_orient = torch.nan_to_num(r_orient, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # 5) Grasp pose: EE at object center height and very close in XY
-        #    Once hovering, move down to around middle of box while staying aligned.
-        grasp_z = obj_height + 0.5 * obj_half_height
-        ee_z_error_grasp = ee_pos[..., 2] - grasp_z
-
-        grasp_xy_thresh = 0.06
-        near_xy_for_grasp = torch.exp(-80.0 * (ee_obj_xy_dist ** 2))
-        near_xy_for_grasp = torch.nan_to_num(
-            near_xy_for_grasp, nan=0.0, posinf=0.0, neginf=0.0
-        )
-
-        grasp_z_temp = 60.0
-        r_grasp_pose = torch.exp(-grasp_z_temp * (ee_z_error_grasp ** 2)) * near_xy_for_grasp
-        r_grasp_pose = torch.nan_to_num(r_grasp_pose, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # 6) Gripper closing when at grasp pose
-        #    Encourage smaller width once close to object center.
-        close_temp = 4.0
-        # Rough scale: typical max opening maybe ~0.08 m
-        width_norm = torch.clamp(gripper_width / (0.08 + eps), 0.0, 2.0)
-        r_close_raw = 1.0 - torch.exp(-close_temp * (1.0 - width_norm).clamp(min=0.0))
-        r_close_raw = torch.nan_to_num(r_close_raw, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # Gate by proximity in XY and Z
-        close_gate_temp = 40.0
-        close_xy_gate = torch.exp(-close_gate_temp * (ee_obj_xy_dist ** 2))
-        close_z_gate = torch.exp(-close_gate_temp * (ee_z_error_grasp ** 2))
-        close_gate = (close_xy_gate * close_z_gate).clamp(0.0, 1.0)
-        r_close_gripper = r_close_raw * close_gate
-        r_close_gripper = torch.nan_to_num(
-            r_close_gripper, nan=0.0, posinf=0.0, neginf=0.0
-        )
-
-        # 7) Lift object: main success signal
-        #    Dense reward on object height above table; saturates at a modest lift.
-        lift_target = obj_half_height + 0.05  # center ~half-height+5cm above table
-        height_above_table = torch.clamp(obj_height - table_height, min=0.0)
-        lift_temp = 15.0
-        # r_lift_height ~1 when obj_height >= lift_target; smooth below that.
-        r_lift_height = torch.exp(
-            -lift_temp * torch.clamp(lift_target - height_above_table, min=0.0) ** 2
-        )
-        r_lift_height = torch.nan_to_num(
-            r_lift_height, nan=0.0, posinf=0.0, neginf=0.0
-        )
-
-        # Optional contact factor – do not gate too aggressively to keep gradient
-        contact_temp = 0.02
-        contact_factor = 1.0 - torch.exp(-contact_temp * obj_contact_mag)
-        contact_factor = torch.nan_to_num(
-            contact_factor, nan=0.0, posinf=0.0, neginf=0.0
-        )
-
-        # Softly favor lifts with contact, but still reward pure lifting signal
-        r_grasp_lift = r_lift_height * (0.3 + 0.7 * contact_factor)
-        r_grasp_lift = torch.nan_to_num(
-            r_grasp_lift, nan=0.0, posinf=0.0, neginf=0.0
-        )
-
-        # 8) Object stability once lifted: prefer low speed when lifted
-        stable_temp = 3.0
-        is_lifted = (height_above_table > lift_target - 0.01).float()
-        r_obj_stable = torch.exp(-stable_temp * obj_speed) * is_lifted
-        r_obj_stable = torch.nan_to_num(
-            r_obj_stable, nan=0.0, posinf=0.0, neginf=0.0
-        )
-
-        # 9) Smoothness: small penalty on joint velocity (no huge constant bonuses)
-        smooth_temp = 0.03
-        r_smooth = torch.exp(-smooth_temp * dof_vel_norm)
-        r_smooth = torch.nan_to_num(r_smooth, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # ----------------------------------------------------------------------
-        # Combine rewards with balanced weights
-        # ----------------------------------------------------------------------
-        # Weights chosen such that a good episode can reach per-step reward ~2–4
-        w_approach = 0.4
-        w_xy_align = 0.6
-        w_hover = 0.5
-        w_orient = 0.4
-        w_grasp_pose = 0.7
-        w_close_gripper = 0.6
-        w_grasp_lift = 2.0
-        w_obj_stable = 0.3
-        w_smooth = 0.1
-
-        reward = (
-            w_approach * r_approach
-            + w_xy_align * r_xy_align
-            + w_hover * r_hover
-            + w_orient * r_orient
-            + w_grasp_pose * r_grasp_pose
-            + w_close_gripper * r_close_gripper
-            + w_grasp_lift * r_grasp_lift
-            + w_obj_stable * r_obj_stable
-            + w_smooth * r_smooth
-        )
-
-        reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
-        reward = torch.clamp(reward, min=0.0)
-
-        # Ensure reward is finite
-        assert torch.isfinite(reward).all(), "Non-finite reward encountered"
-
-        individual_rewards = {
-            "r_approach": r_approach,
-            "r_xy_align": r_xy_align,
-            "r_hover": r_hover,
-            "r_orient": r_orient,
-            "r_grasp_pose": r_grasp_pose,
-            "r_close_gripper": r_close_gripper,
-            "r_grasp_lift": r_grasp_lift,
-            "r_obj_stable": r_obj_stable,
-            "r_smooth": r_smooth,
-        }
-
-        return reward, individual_rewards
-
-
-
-    def run_replay(self):
-        env_ids = torch.arange(50, device=self.device, dtype=torch.long)
+    def run_replay(self,log_dir):
+        #TODO: make sure number of envs are enough for replay
+        print(f"REPLAY LOG DIR {log_dir}")
+        num_episodes = len(self.episodes)
+        env_ids = torch.arange(num_episodes, device=self.device, dtype=torch.long)
         self._reset_idx(env_ids)
         # [num_envs, step, states]
         # first loop over, add padding, then stack.
-        writer = SummaryWriter(self.log_dir)
-        num_episodes = len(self.episodes)
+        writer = SummaryWriter(log_dir)
+        
 
         eureka_episode_sums = dict()
         eureka_episode_sums["eureka_total_rewards"] = torch.zeros(num_episodes, device=self.device)
@@ -1012,12 +616,12 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
 
         # 2. Compute max episode length
         lengths = [len(ep["states"]) for ep in self.episodes]
-        if self.debug:
-            print(lengths)
+        # if self.debug:
+            # print(lengths)
         max_len = max(lengths)
-        if self.debug:
-            print(f"max_len {max_len}")
-            print(f"num_envs: {self.num_envs}")
+        # if self.debug:
+        #     print(f"max_len {max_len}")
+        #     print(f"num_envs: {self.num_envs}")
         # 3. Determine state dimensions
         # robot
         # robot_pos_dim = len(self.episodes[0]["states"][0]["franka"]["pos"])      # 3
@@ -1040,7 +644,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
         object_rot = torch.zeros((self.num_envs, max_len, num_objects, object_rot_dim),device=self.device,dtype=torch.float32)
 
         padding_mask = torch.ones((self.num_envs, max_len), dtype=torch.bool)
-
+        
         # 5. Fill tensors
         with torch.inference_mode():
             for env_idx, ep in enumerate(self.episodes): # each episode
