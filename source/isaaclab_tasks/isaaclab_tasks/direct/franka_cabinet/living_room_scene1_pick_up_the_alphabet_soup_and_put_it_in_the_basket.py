@@ -556,7 +556,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
 
         self.site_to_target_pos = self.target_site.data.root_pos_w - self.target_object.data.root_pos_w
         self.local_world_corners_target_obj = self.local_corners_target_obj + self.target_object.data.root_pos_w.unsqueeze(1)
-        local_world_corners_target_obj =  self.local_corners_target_obj.reshape(self.local_corners_target_obj.shape[0], -1)
+        local_world_corners_target_obj =  self.local_world_corners_target_obj.reshape(self.local_corners_target_obj.shape[0], -1)
         obs = torch.cat(
             (
                 dof_pos_scaled,
@@ -597,7 +597,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
 
 
 
-    def run_replay(self,log_dir):
+    def run_replay(self, log_dir:str, render:bool=False):
         #TODO: make sure number of envs are enough for replay
         print(f"REPLAY LOG DIR {log_dir}")
         num_episodes = len(self.episodes)
@@ -644,7 +644,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
         object_pos = torch.zeros((self.num_envs, max_len, num_objects, object_pos_dim),device=self.device,dtype=torch.float32)
         object_rot = torch.zeros((self.num_envs, max_len, num_objects, object_rot_dim),device=self.device,dtype=torch.float32)
 
-        padding_mask = torch.ones((self.num_envs, max_len), dtype=torch.bool)
+        padding_mask = torch.ones((self.num_envs, max_len),device=self.device, dtype=torch.bool)
         
         # 5. Fill tensors
         with torch.inference_mode():
@@ -688,12 +688,12 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
             
             # similar to step function
                 self.scene.write_data_to_sim()
-                self.sim.step(render=True)
-                if t%2 ==0:
-                    self.sim.render()
+                self.sim.step(render=False)
+                if render:                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
+                    if t%2 ==0:
+                        self.sim.render()
                 self.scene.update(dt=self.physics_dt)
-                # import pdb
-                # pdb.set_trace()
+
 
                 # call reward function, should be from eureka
                 if hasattr(self, "_get_rewards_eureka"):
@@ -714,15 +714,35 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
                         eureka_episode_sums[key] += rewards_dict_replay[key]
 
 
-                    for k in eureka_episode_sums.keys():
-                        writer.add_scalar("Replay/"+k, eureka_episode_sums[k].mean().item(), t) 
+                # After all replay is done, devide by episode length, and record
+            for k in eureka_episode_sums.keys():
+                # max_episode_length_s
+                libero_dt = 1/20
+
+                per_ep_value = eureka_episode_sums[k] / (libero_dt * lengths_tensor) # Should also consider dt and maybe interpolate velocity/simulate
+                writer.add_scalar("Replay/"+k +"_mean", per_ep_value.mean().item(), t) 
+                writer.add_scalar("Replay/"+k +"_std", per_ep_value.std().item(), t) 
 
 
 
-
-        # reset the first num_envs environment, or all
-
-
-            # env_ids = torch.arange(50, device=self.device, dtype=torch.long)
-        self._reset_idx(env_ids)
+                    # enhanced_feedback=True
+                    # min_max_feedback=False
+                    # for k in eureka_episode_sums.keys():
+                    #     if enhanced_feedback:
+                    #         if min_max_feedback:
+                    #             writer.add_scalars("Replay/"+k, 
+                    #                             {"mean": eureka_episode_sums[k].mean().item(), 
+                    #                             "min": eureka_episode_sums[k].min().item(), 
+                    #                             "max": eureka_episode_sums[k].max().item(), },
+                    #                                 t) 
+                    #         else:
+                    #             mu = eureka_episode_sums[k].mean()
+                    #             var = eureka_episode_sums[k].var(unbiased=False)
+                    #             writer.add_scalars("Replay/"+k, 
+                    #                             {"mu": mu.item(), 
+                    #                             "var": var.item(), },
+                    #                                 t) 
+                    #     else:
+                    #         writer.add_scalar("Replay/"+k, eureka_episode_sums[k].mean().item(), t)                        
+            self._reset_idx(env_ids)
 
