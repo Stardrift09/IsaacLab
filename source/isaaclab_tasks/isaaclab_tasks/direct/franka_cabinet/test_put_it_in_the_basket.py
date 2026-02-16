@@ -25,7 +25,7 @@ from torch.utils.tensorboard import SummaryWriter
 # from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 
 @configclass
-class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg):
+class TestPutItInTheBasketCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 8.3333  # 500 timesteps
     decimation = 2
@@ -55,7 +55,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1920, env_spacing=3.0, replicate_physics=True, clone_in_fabric=True, 
+        num_envs=1600, env_spacing=3.0, replicate_physics=True, clone_in_fabric=True, 
     )
 
 
@@ -199,7 +199,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg(DirectRLEnvCfg
     finger_reward_scale = 2.0
 
 
-class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
+class TestPutItInTheBasket(DirectRLEnv):
     # pre-physics step calls
     #   |-- _pre_physics_step(action)
     #   |-- _apply_action()
@@ -209,9 +209,9 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
     #   |-- _reset_idx(env_ids)
     #   |-- _get_observations()
 
-    cfg: LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg
+    cfg: TestPutItInTheBasketCfg
 
-    def __init__(self, cfg: LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasketCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: TestPutItInTheBasketCfg, render_mode: str | None = None, **kwargs):
         self.debug = False  
         self.path = cfg.path # scene init is called in super
         self.root = cfg.root
@@ -398,8 +398,8 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
         self.quat = torch.zeros([self.num_envs, 4],device=self.device)
         self.target_to_hand_pos = torch.zeros((self.num_envs, 3),device=self.device) # relative position
         self.site_to_target_pos = torch.zeros((self.num_envs, 3),device=self.device) # relative position
-
-        if self.debug:
+        debug = False
+        if debug:
             pos = self.target_object.data.root_pos_w - self.scene.env_origins
             quat_1=torch.tensor([0.7071, 0.7071, 0, 0],device = self.device) # x
             quat_2=torch.tensor([0.7071, 0, 0, 0.7071],device = self.device) # z
@@ -415,11 +415,14 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
 
 
 
+
+        # TARGET SITE
+
         prim = stage.GetPrimAtPath(f"/World/envs/env_0/{self.target_site_name}/object")
         bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default"]).ComputeWorldBound(prim)
         min_wc = bbox.GetRange().GetMin()
         max_wc = bbox.GetRange().GetMax()
-        self.target_site_corners_world = torch.tensor(
+        self.target_object_corners_world = torch.tensor(
             [
                 [min_wc[0], min_wc[1], min_wc[2]],
                 [max_wc[0], max_wc[1], max_wc[2]],
@@ -427,18 +430,23 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
             dtype=torch.float32,
             device=self.device,
         )  # [2, 3]
-        self.target_site_corners_world -= self.scene.env_origins[0] # in env-local frame
+        self.target_object_corners_world -= self.scene.env_origins[0] # in env-local frame
         target_site_size = torch.tensor((max_wc - min_wc), device=self.device)
+        # Since I never want the site to be moved, I don't need to calculate its local corners and later transform in each env.
         obj_xy_extent = self.target_object_size[:2].min()
         site_xy_extent = target_site_size[:2].max()
+        # termination condition
         # half extents
         obj_half = 0.5 * obj_xy_extent
         site_half = 0.5 * site_xy_extent
         self.target_site_radius = site_half - obj_half
         if self.target_site_radius.item() < 0:
             self.target_site_radius = torch.tensor(0.02)
-
-
+        self.input_direction = torch.tensor([0, 0, 1], device=self.device) # z axis
+        debug = False
+        if debug:
+            import pdb
+            pdb.set_trace()
 
         hand_pose = get_env_local_pose(
             self.scene.env_origins[0],
@@ -482,7 +490,8 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
 
 
     def _setup_scene(self):
-        init_states = self.data['franka'][0]["init_state"] # this is from the first scene as set up. Init states of traj should be updated in reset_idx
+        # init_states = self.data['franka'][0]["init_state"] # this is from the first scene as set up. Init states of traj should be updated in reset_idx
+        init_states = self.data['franka'][0]["states"][100]
         robot_data = init_states['franka'] # seems that joint pos for isaaclab is always positive
         robot_joint_pos = robot_data["dof_pos"]
         # print(f"robot_joint_pos:{robot_joint_pos}")
@@ -540,6 +549,8 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
         for k in keys:
             # if k in ["ketchup", "cream_cheese", "tomato_sauce"]:
             #     self.object_names.remove(k) # remove distractors for now, to be added in later ablations
+            if k == self.target_object_name:
+                print(f"target object {k} initial z height: {init_states[k]['pos'][2]}")
             cfg = RigidObjectCfg(
                 prim_path=f"/World/envs/env_.*/{k}",
                 init_state=RigidObjectCfg.InitialStateCfg(
@@ -627,12 +638,7 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
     def _reset_idx(self, env_ids: torch.Tensor | None):
         super()._reset_idx(env_ids)
         # robot state
-        joint_pos = self._robot.data.default_joint_pos[env_ids] + sample_uniform(
-            -0.125,
-            0.125,
-            (len(env_ids), self._robot.num_joints),
-            self.device,
-        )
+        joint_pos = self._robot.data.default_joint_pos[env_ids] # TODO: recover randomization and test
         joint_pos = torch.clamp(joint_pos, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
         joint_vel = torch.zeros_like(joint_pos)
         self._robot.set_joint_position_target(joint_pos, env_ids=env_ids)
@@ -675,23 +681,22 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
 
     def _get_observations(self) -> dict:
         # self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
-        # self.rigid_objects is a list with all RigidObject, you can use it to calculate AABBs.
+        # self.rigid_objects is a list with all RigidObjects
+        # Objects' root_pos_w is their center, and site's root_pos_w is the bottom center.
+        # if the object has fallen, no reward is meaningful, this is the first thing to do
         dof_pos_scaled = (
             2.0
             * (self._robot.data.joint_pos - self.robot_dof_lower_limits)
             / (self.robot_dof_upper_limits - self.robot_dof_lower_limits)
             - 1.0
         )
-        self.target_to_hand_pos = self.target_object.data.body_pos_w.squeeze(1) - self.robot_grasp_pos # n, 3
-        hand_quat = self._robot.data.body_quat_w[:, self.hand_link_idx]
-        # Forcing the 0th and 3th element of hand_quat to be 0 to point downwards. You can also penalize the rotation of the target object
-
         self.corners_target_obj_to_hand_pos =  (self.corners_target_obj - self.robot_grasp_pos.unsqueeze(1)).reshape(self.num_envs, -1) # corners to robot dist described in world coordinate.
-        self.site_to_target_pos = self.target_site.data.root_pos_w - self.target_object.data.root_pos_w       
+        self.target_to_hand_pos = self.target_object.data.root_pos_w - self.robot_grasp_pos # n, 3
+        hand_quat = self._robot.data.body_quat_w[:, self.hand_link_idx]
+        self.site_to_target_pos = self.target_site.data.root_pos_w - self.target_object.data.root_pos_w
         
         # self.target_object_corners_world # you can read the three dim from the [2, 3] tensor storing min(first row) and max corner of the site in local env frame
         # you can check the direction where you enter with self.input_direction
-        
         obs = torch.cat(
             (
                 dof_pos_scaled,
@@ -699,13 +704,14 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
                 self.corners_target_obj_to_hand_pos, # this should be small
                 self.target_to_hand_pos, # relative position from target object center to hand should be small
                 hand_quat, # be close to inital orientation (pointing downwards is good, allows z axis rotation
-                self.site_to_target_pos # Move to 20 CM high before moving to the site
+                self.site_to_target_pos, # relative position in x y from target site to target object
             ),
             dim=-1,
         )
 
-
-        # print(self.target_to_hand_pos[0])
+        # import pdb
+        # pdb.set_trace()
+        # print(self.target_to_hand_pos[0][2])
 
         return {"policy": torch.clamp(obs, -5.0, 5.0)}
 
@@ -828,6 +834,20 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
                     if t%2 ==0:
                         self.sim.render()
                 self.scene.update(dt=self.physics_dt)
+
+                detect_grasp = True
+                if detect_grasp:
+                    # update self.robot_grasp_pos
+                    _,_ = self._get_dones()
+                    diff = self.target_object.data.body_pos_w.squeeze(1) - self.robot_grasp_pos
+                    # print(diff[0]) # play the first episode to check the constant object-hand distance
+                    diff_norm = torch.norm(diff, dim=-1)  # shape: (n,)
+                    if diff_norm[0] < 0.01 and self.target_object.data.root_pos_w[0,2] > 0.1: # check if the grasp is stable (object-hand distance is small) and the object is lifted up (z is large), which should happen at the end of episode when the agent learns to lift up the object while keeping a stable grasp
+                        print(f"timestep {t}: object in the air")
+                    print(diff_norm[0]) # should be small and constant if the grasp is stable, which is the case for most of the episode, except at the end when the object is lifted up and the grasp is broken. This matches with the observation that the agent learns to keep a stable grasp and lift up the object at the end of training.
+                    print(self.target_object.data.root_pos_w[0,2]) # also check the object position, should be lifted up at the end of episode
+                    # _ = self._get_observations() # this will update the corners_target_obj_to_hand_pos, which is the relative position from object corners to hand in world coordinate, should be small if the grasp is stable. This is a more direct way to check the grasp stability, and also provides more information about the relative position between the hand and the object, which can be useful for reward design.
+                    # print(self.corners_target_obj_to_hand_pos[0])
 
 
                 # call reward function, should be from eureka
@@ -1050,3 +1070,8 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
             "z_obj": z_obj,
         }
         return reward, individual_rewards
+    
+
+
+    def get_corresponding_object_pos(self, init_states: dict):
+        # Firstly find out the relative transformation, and then adjust the object pose according to robot pose.
