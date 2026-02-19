@@ -55,7 +55,7 @@ class TestPutItInTheBasketCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1600, env_spacing=3.0, replicate_physics=True, clone_in_fabric=True, 
+        num_envs=2048, env_spacing=3.0, replicate_physics=True, clone_in_fabric=True, 
     )
 
 
@@ -422,7 +422,7 @@ class TestPutItInTheBasket(DirectRLEnv):
         bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default"]).ComputeWorldBound(prim)
         min_wc = bbox.GetRange().GetMin()
         max_wc = bbox.GetRange().GetMax()
-        self.target_object_corners_world = torch.tensor(
+        self.target_site_corners_world = torch.tensor(
             [
                 [min_wc[0], min_wc[1], min_wc[2]],
                 [max_wc[0], max_wc[1], max_wc[2]],
@@ -430,7 +430,7 @@ class TestPutItInTheBasket(DirectRLEnv):
             dtype=torch.float32,
             device=self.device,
         )  # [2, 3]
-        self.target_object_corners_world -= self.scene.env_origins[0] # in env-local frame
+        self.target_site_corners_world -= self.scene.env_origins[0] # in env-local frame
         target_site_size = torch.tensor((max_wc - min_wc), device=self.device)
         # Since I never want the site to be moved, I don't need to calculate its local corners and later transform in each env.
         obj_xy_extent = self.target_object_size[:2].min()
@@ -485,13 +485,14 @@ class TestPutItInTheBasket(DirectRLEnv):
 
         self.robot_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
         self.robot_grasp_pos = torch.zeros((self.num_envs, 3), device=self.device)
+        self.hand_quat = torch.zeros((self.num_envs, 4), device=self.device) 
         self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
-        self.quat_desired = torch.tensor([0, 0, 0, 1], device=self.device).repeat(self.num_envs, 1)
-
+        
 
     def _setup_scene(self):
         # init_states = self.data['franka'][0]["init_state"] # this is from the first scene as set up. Init states of traj should be updated in reset_idx
-        init_states = self.data['franka'][0]["states"][100]
+        # init_states = self.data['franka'][0]["states"][100]
+        init_states = self.data['franka'][0]["states"][80] # 92 in the air. Used 100 For two round training, now use 80, starting from ground
         robot_data = init_states['franka'] # seems that joint pos for isaaclab is always positive
         robot_joint_pos = robot_data["dof_pos"]
         # print(f"robot_joint_pos:{robot_joint_pos}")
@@ -602,22 +603,7 @@ class TestPutItInTheBasket(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         # manual update for observation needed values
-        hand_pos = self._robot.data.body_pos_w[:, self.hand_link_idx]
-        hand_rot = self._robot.data.body_quat_w[:, self.hand_link_idx]
-
-        self.robot_grasp_rot, self.robot_grasp_pos = tf_combine(
-            hand_rot, hand_pos, self.robot_local_grasp_rot, self.robot_local_grasp_pos
-        )
-        # update obj corners
-        pos = self.target_object.data.root_pos_w
-        quat= quat_conjugate(self.target_object.data.root_quat_w)
-
-        self.corners_target_obj = transform_points(points=self.local_corners_init,
-                                              pos=pos,
-                                              quat=quat)
-        self.local_centers = transform_points(points=self.local_centers_init,
-                                              pos=pos,
-                                              quat=quat)
+        self._compute_intermediate_values()
 
         # condition for termination
         low_enough = self.target_object.data.root_pos_w[:, 2] <0.1
@@ -657,25 +643,8 @@ class TestPutItInTheBasket(DirectRLEnv):
             object.write_root_pose_to_sim(object_default_state[:, :7], env_ids)
             object.write_root_velocity_to_sim(object_default_state[:, 7:], env_ids)
 
-        hand_pos = self._robot.data.body_pos_w[env_ids, self.hand_link_idx]
-        hand_rot = self._robot.data.body_quat_w[env_ids, self.hand_link_idx]
-
-        self.robot_grasp_rot[env_ids], self.robot_grasp_pos[env_ids] = tf_combine(
-            hand_rot, hand_pos, self.robot_local_grasp_rot[env_ids], self.robot_local_grasp_pos[env_ids]
-        )
-
-        # update obj corners
-        pos = self.target_object.data.root_pos_w[env_ids]
-        quat= quat_conjugate(self.target_object.data.root_quat_w[env_ids])
-        self.corners_target_obj[env_ids] = transform_points(points=self.local_corners_init[env_ids],
-                                              pos=pos,
-                                              quat=quat)
-        self.local_centers[env_ids] = transform_points(points=self.local_centers_init[env_ids],
-                                              pos=pos,
-                                              quat=quat)
+        self._compute_intermediate_values(env_ids=env_ids)
         
-
-        # clear helper variable
         self.helper_variable[env_ids] = torch.zeros((len(env_ids), 10), device=self.device)
 
 
@@ -684,6 +653,7 @@ class TestPutItInTheBasket(DirectRLEnv):
         # self.rigid_objects is a list with all RigidObjects
         # Objects' root_pos_w is their center, and site's root_pos_w is the bottom center.
         # if the object has fallen, no reward is meaningful, this is the first thing to do
+        # you may use rule based operation to detect current stage and set different reward for each stage, for example, if the object is right above the basket, and hand pose is correct, drop it.
         dof_pos_scaled = (
             2.0
             * (self._robot.data.joint_pos - self.robot_dof_lower_limits)
@@ -692,10 +662,11 @@ class TestPutItInTheBasket(DirectRLEnv):
         )
         self.corners_target_obj_to_hand_pos =  (self.corners_target_obj - self.robot_grasp_pos.unsqueeze(1)).reshape(self.num_envs, -1) # corners to robot dist described in world coordinate.
         self.target_to_hand_pos = self.target_object.data.root_pos_w - self.robot_grasp_pos # n, 3
-        hand_quat = self._robot.data.body_quat_w[:, self.hand_link_idx]
+        self.hand_quat = self._robot.data.body_quat_w[:, self.hand_link_idx]
+        # 
         self.site_to_target_pos = self.target_site.data.root_pos_w - self.target_object.data.root_pos_w
         
-        # self.target_object_corners_world # you can read the three dim from the [2, 3] tensor storing min(first row) and max corner of the site in local env frame
+        # self.target_site_corners_world # you can read the three dim from the [2, 3] tensor storing min(first row) and max corner of the site in local env frame
         # you can check the direction where you enter with self.input_direction
         obs = torch.cat(
             (
@@ -703,7 +674,7 @@ class TestPutItInTheBasket(DirectRLEnv):
                 self._robot.data.joint_vel * self.cfg.dof_velocity_scale,
                 self.corners_target_obj_to_hand_pos, # this should be small
                 self.target_to_hand_pos, # relative position from target object center to hand should be small
-                hand_quat, # be close to inital orientation (pointing downwards is good, allows z axis rotation
+                self.hand_quat, # be close to inital orientation (pointing downwards is good, allows z axis rotation(Hint:When 0 and 3 element is zero, hand is pointing downwards)
                 self.site_to_target_pos, # relative position in x y from target site to target object
             ),
             dim=-1,
@@ -711,7 +682,7 @@ class TestPutItInTheBasket(DirectRLEnv):
 
         # import pdb
         # pdb.set_trace()
-        # print(self.target_to_hand_pos[0][2])
+        print(self.hand_quat)
 
         return {"policy": torch.clamp(obs, -5.0, 5.0)}
 
@@ -733,7 +704,7 @@ class TestPutItInTheBasket(DirectRLEnv):
             "action_penalty": (-action_penalty_scale * action_penalty).mean(),
         }
 
-        # rewards = torch.where(cream_cheese_pos[:,2] > 0.1, rewards + 1, rewards)
+        rewards = self.hand_quat[:,1].abs() + self.hand_quat[:,2].abs() + action_penalty_scale * action_penalty
         return rewards
 
 
@@ -743,7 +714,7 @@ class TestPutItInTheBasket(DirectRLEnv):
         print(f"REPLAY LOG DIR {log_dir}")
         num_episodes = len(self.episodes)
         env_ids = torch.arange(num_episodes, device=self.device, dtype=torch.long)
-        self._reset_idx(env_ids)
+        self._reset_idx(env_ids) # reset twice to make sure the states are correct
         # [num_envs, step, states]
         # first loop over, add padding, then stack.
         writer = SummaryWriter(log_dir)
@@ -1073,5 +1044,34 @@ class TestPutItInTheBasket(DirectRLEnv):
     
 
 
-    def get_corresponding_object_pos(self, init_states: dict):
+    def get_target_object_to_hand_pose(self, init_states: dict):
         # Firstly find out the relative transformation, and then adjust the object pose according to robot pose.
+        # Assume that the scene has been initialized
+        pass
+
+
+
+    def _compute_intermediate_values(self, env_ids: torch.Tensor | None = None):
+        if env_ids is None:
+            env_ids = self._robot._ALL_INDICES
+        self._compute_robot_intermediate_values(env_ids)
+        self._compute_target_object_corners(env_ids)
+        
+
+
+    def _compute_robot_intermediate_values(self, env_ids: torch.Tensor):
+        hand_pos = self._robot.data.body_pos_w[env_ids, self.hand_link_idx]
+        hand_rot = self._robot.data.body_quat_w[env_ids, self.hand_link_idx]
+        self.robot_grasp_rot[env_ids], self.robot_grasp_pos[env_ids] = tf_combine(
+            hand_rot, hand_pos, self.robot_local_grasp_rot[env_ids], self.robot_local_grasp_pos[env_ids]
+        )
+
+    def _compute_target_object_corners(self, env_ids: torch.Tensor):
+        pos = self.target_object.data.root_pos_w[env_ids]
+        quat= quat_conjugate(self.target_object.data.root_quat_w[env_ids])
+        self.corners_target_obj[env_ids] = transform_points(points=self.local_corners_init[env_ids],
+                                              pos=pos,
+                                              quat=quat)
+        self.local_centers[env_ids] = transform_points(points=self.local_centers_init[env_ids],
+                                              pos=pos,
+                                              quat=quat)
