@@ -492,6 +492,8 @@ class TestPutItInTheBasket(DirectRLEnv):
     def _setup_scene(self):
         # init_states = self.data['franka'][0]["init_state"] # this is from the first scene as set up. Init states of traj should be updated in reset_idx
         # init_states = self.data['franka'][0]["states"][100]
+
+        self.start_idx_in_episode = 80
         init_states = self.data['franka'][0]["states"][80] # 92 in the air. Used 100 For two round training, now use 80, starting from ground
         robot_data = init_states['franka'] # seems that joint pos for isaaclab is always positive
         robot_joint_pos = robot_data["dof_pos"]
@@ -614,11 +616,14 @@ class TestPutItInTheBasket(DirectRLEnv):
         terminated = inside_site & low_enough
         # terminated = self.target_object.data.root_pos_w[:, 2] > 0.4
         truncated = self.episode_length_buf >= self.max_episode_length - 1
+
+        # print(f"inside_site{inside_site}")
+        # print(f"low_enough{low_enough}")
         return terminated, truncated
     
-    def _get_rewards(self) -> torch.Tensor:
+    # def _get_rewards(self) -> torch.Tensor:
 
-        return self._compute_rewards(self.actions,self.cfg.action_penalty_scale,)
+    #     return self._compute_rewards(self.actions,self.cfg.action_penalty_scale,)
 
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -652,8 +657,7 @@ class TestPutItInTheBasket(DirectRLEnv):
         # self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
         # self.rigid_objects is a list with all RigidObjects
         # Objects' root_pos_w is their center, and site's root_pos_w is the bottom center.
-        # if the object has fallen, no reward is meaningful, this is the first thing to do
-        # you may use rule based operation to detect current stage and set different reward for each stage, for example, if the object is right above the basket, and hand pose is correct, drop it.
+
         dof_pos_scaled = (
             2.0
             * (self._robot.data.joint_pos - self.robot_dof_lower_limits)
@@ -679,10 +683,6 @@ class TestPutItInTheBasket(DirectRLEnv):
             ),
             dim=-1,
         )
-
-        # import pdb
-        # pdb.set_trace()
-        print(self.hand_quat)
 
         return {"policy": torch.clamp(obs, -5.0, 5.0)}
 
@@ -877,171 +877,266 @@ class TestPutItInTheBasket(DirectRLEnv):
 
 
 
-    def _get_rewards_test(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def _get_rewards(self):
         import torch
 
         device = self.device
         eps: float = 1e-6
+        N = self.num_envs
 
-        # ----------------------------
-        # Read & sanitize state
-        # ----------------------------
+        # -----------------------------
+        # Sanitize key state (GPU-safe)
+        # -----------------------------
         obj_pos = torch.nan_to_num(self.target_object.data.root_pos_w, nan=0.0, posinf=0.0, neginf=0.0)  # (N,3)
-        ee_pos = torch.nan_to_num(self.robot_grasp_pos, nan=0.0, posinf=0.0, neginf=0.0)  # (N,3)
+        site_pos = torch.nan_to_num(self.target_site.data.root_pos_w, nan=0.0, posinf=0.0, neginf=0.0)  # (N,3)
+        hand_pos = torch.nan_to_num(self.robot_grasp_pos, nan=0.0, posinf=0.0, neginf=0.0)  # (N,3)
+        hand_quat = torch.nan_to_num(self.hand_quat, nan=0.0, posinf=0.0, neginf=0.0)  # (N,4)
 
-        rel = torch.nan_to_num(obj_pos - ee_pos, nan=0.0, posinf=0.0, neginf=0.0)  # obj - ee
-        rel_xy = torch.linalg.norm(rel[:, :2], dim=-1).clamp(min=0.0)
-        rel_z = rel[:, 2].clamp(min=-2.0, max=2.0)
-        dist = torch.linalg.norm(rel, dim=-1).clamp(min=0.0)
+        obj_xy = obj_pos[:, :2]
+        site_xy = site_pos[:, :2]
+        obj_z = obj_pos[:, 2]
+        site_z = site_pos[:, 2]
 
-        z_obj = obj_pos[:, 2].clamp(min=-2.0, max=2.0)
+        # Distances
+        d_xy = torch.linalg.norm(obj_xy - site_xy, dim=-1)
+        d_hand = torch.linalg.norm(obj_pos - hand_pos, dim=-1)
 
-        joint_vel = torch.nan_to_num(self._robot.data.joint_vel, nan=0.0, posinf=0.0, neginf=0.0)
-        vel_l2 = torch.sqrt(torch.sum(joint_vel * joint_vel, dim=-1) + eps)
+        # Given success metric
+        r_true: float = float(self.target_site_radius)
+        low_enough = obj_z < 0.1
+        inside_site = d_xy < r_true
+        success = (inside_site & low_enough).float()
 
-        # -------------------------------------------------------------------------
-        # Analysis-driven rewrite:
-        # - Your logs show many components are constant across training (reach/corners/orientation/above/etc.).
-        #   That indicates those terms were either coming from a different reward function in your run
-        #   or were effectively saturated/decoupled from action.
-        # - Most critically: task_score/success/lift stayed 0. This means the agent never triggers lift.
-        # - Also: rel_z is very negative (~ -4.5), and dist/rel_xy can get huge -> the agent often places
-        #   the hand far above the object (EE z >> obj z) and still receives large dense rewards due to
-        #   saturation / scaling issues in previous shaping.
+        # ---------------------------------------------------------
+        # Core issue from feedback:
+        # - obj_z goes to ~10m: exploit; penalties not preventing.
+        # - d_xy remains huge: agent not truly moving above basket.
+        # - shaped rewards still high: stage gates saturate and/or
+        #   agent gets reward without satisfying the real conditions.
         #
-        # New reward design goals:
-        #   (1) Keep ALL dense terms in [0, 1] with gentle temperatures (no >50 magnitudes).
-        #   (2) Strongly encourage "hand slightly ABOVE object" first (safe approach).
-        #   (3) Then encourage descending to a "grasp band" (EE slightly BELOW object center),
-        #       but only after XY is aligned (prevents descending far away).
-        #   (4) Encourage lift based on object height ALWAYS (not gated on unknown grasp signal),
-        #       but scale it up when the EE is close to object (so lifting while not near gives less).
-        #   (5) Add a strong sparse success bonus at z_obj > 0.4.
-        # -------------------------------------------------------------------------
+        # Fixes:
+        # 1) Make an explicit *height ceiling* penalty based on absolute z
+        #    (not relative to site only). This clamps the "fly to sky" exploit.
+        # 2) Use a strict stage machine with hard-ish gates (ramps), and
+        #    ensure each stage reward is only active when its gate is active.
+        # 3) Greatly increase the cost of being far in XY while "high" (carry),
+        #    and cost of being "low" while not centered (bad drop).
+        # 4) Keep all per-step components bounded ~[0,1], and total reward ~[-10,10].
+        # ---------------------------------------------------------
 
-        # ----------------------------
-        # Shaping: XY centering (dense)
-        # ----------------------------
-        # Temperatures chosen to avoid saturation too early, still providing gradient from far away.
-        t_xy: float = 0.10
-        r_xy = torch.exp(-rel_xy / (t_xy + eps)).clamp(0.0, 1.0)
+        # -----------------------------
+        # Targets / tolerances
+        # -----------------------------
+        carry_clearance: float = 0.10
+        z_carry = site_z + carry_clearance
 
-        # 3D distance shaping (so it can't get reward by only matching XY while being meters away in Z)
-        t_dist: float = 0.25
-        r_dist = torch.exp(-dist / (t_dist + eps)).clamp(0.0, 1.0)
+        # Soft radii for gradients
+        r_soft: float = r_true + 0.10
+        r_carry_need: float = r_true + 0.25  # looser for "approach above basket"
 
-        # ----------------------------
-        # Shaping: approach from above (EE above object by ~8cm)
-        # rel_z = obj_z - ee_z. For EE above: rel_z negative.
-        # Target rel_z ~= -0.08.
-        # ----------------------------
-        above_target: float = -0.08
-        above_err = (rel_z - above_target).abs().clamp(0.0, 2.0)
-        t_above: float = 0.10
-        r_above = torch.exp(-above_err / (t_above + eps)).clamp(0.0, 1.0)
+        # -----------------------------
+        # Helper: ramp functions (0..1)
+        # -----------------------------
+        def ramp(x: torch.Tensor, x0: float, x1: float) -> torch.Tensor:
+            # 0 when x<=x0, 1 when x>=x1
+            denom = max(x1 - x0, eps)
+            return torch.clamp((x - x0) / denom, 0.0, 1.0)
 
-        # Gate for being reasonably centered before we reward descending/grasp band
-        xy_gate_center: float = 0.06
-        xy_gate_temp: float = 0.02
-        g_center = torch.sigmoid((xy_gate_center - rel_xy) / (xy_gate_temp + eps)).clamp(0.0, 1.0)
+        # Height gates
+        g_high = ramp(obj_z, float((z_carry - 0.05).mean().item()) if z_carry.ndim == 0 else 0.0, 1.0)  # placeholder safe
+        # Compute g_high properly without item() to stay vectorized:
+        g_high = torch.clamp((obj_z - (z_carry - 0.05)) / 0.10, 0.0, 1.0)  # 0 below, 1 above carry band
 
-        # ----------------------------
-        # Shaping: "grasp band" (EE slightly below object center by ~2cm)
-        # Target rel_z ~= +0.02.
-        # Only reward when centered in XY (prevents diving elsewhere).
-        # ----------------------------
-        grasp_target: float = 0.02
-        grasp_err = (rel_z - grasp_target).abs().clamp(0.0, 2.0)
-        t_grasp: float = 0.06
-        r_grasp_band = (torch.exp(-grasp_err / (t_grasp + eps)) * g_center).clamp(0.0, 1.0)
+        # Center gate (0..1) using bounded exp
+        temp_center: float = 6.0
+        center_arg = torch.clamp((d_xy / max(r_soft, eps)) ** 2, 0.0, 25.0)
+        g_center = torch.exp(-temp_center * center_arg)
 
-        # ----------------------------
-        # Lift reward: based on object height, but boosted when EE is near object.
-        # This avoids the "never lift because grasp not detected" failure mode.
-        # ----------------------------
-        z_success: float = 0.40
-        z_start: float = 0.10
-        lift_progress = ((z_obj - z_start) / (z_success - z_start + eps)).clamp(0.0, 1.0)
+        # "Ready to drop": must be high AND centered
+        g_ready_drop = g_high * g_center
 
-        # Proximity boost: if the hand stays near while object rises, likely actually grasping.
-        close_dist: float = 0.08
-        close_temp: float = 0.02
-        g_close = torch.sigmoid((close_dist - dist) / (close_temp + eps)).clamp(0.0, 1.0)
+        # Low gate for completion of drop
+        g_low = torch.clamp((0.12 - obj_z) / 0.08, 0.0, 1.0)  # 1 when <=0.04, 0 when >=0.12
 
-        # Smooth but sharper near success to push crossing 0.4
-        r_lift = (lift_progress**3).clamp(0.0, 1.0)
+        # -----------------------------
+        # Stage weights (harder gating)
+        # -----------------------------
+        # Lift until high; carry when high but not centered; drop when ready (centered&high)
+        w_lift = 1.0 - g_high
+        w_drop = g_ready_drop
+        w_carry = torch.clamp(g_high - w_drop, 0.0, 1.0)
 
-        # Combine: always some lift reward, but much larger when close
-        lift_combined = (0.25 * r_lift + 0.75 * (r_lift * g_close)).clamp(0.0, 1.0)
+        w_sum = torch.clamp(w_lift + w_carry + w_drop, min=eps)
+        w_lift = w_lift / w_sum
+        w_carry = w_carry / w_sum
+        w_drop = w_drop / w_sum
 
-        # ----------------------------
-        # Success bonus
-        # ----------------------------
-        raw_success = (z_obj > z_success).to(torch.float32)
-        # Mildly prefer being close at success, but don't over-gate (avoid missing reward on noisy contact)
-        success = (raw_success * (0.5 + 0.5 * g_close)).clamp(0.0, 1.0)
+        # -----------------------------
+        # Bounded rewards (0..1)
+        # -----------------------------
+        # Lift reward: reward reaching carry height, but DO NOT reward going higher.
+        # Use a "below-only" error with exp shaping.
+        temp_lift: float = 8.0
+        z_below = torch.clamp(z_carry - obj_z, min=0.0)
+        lift_arg = torch.clamp((z_below / 0.20) ** 2, 0.0, 25.0)
+        r_lift = torch.exp(-temp_lift * lift_arg)  # 1 when at/above z_carry
 
-        # ----------------------------
-        # Penalties / regularization
-        # ----------------------------
-        vel_pen_scale: float = 0.005
-        vel_pen = (-vel_pen_scale * vel_l2).clamp(-1.0, 0.0)
+        # Height band reward for carry: stay near z_carry (prevents huge z)
+        temp_zband: float = 6.0
+        z_err = torch.clamp(((obj_z - z_carry) / 0.12) ** 2, 0.0, 25.0)
+        r_z_band = torch.exp(-temp_zband * z_err)
 
-        # Penalize being extremely far (helps exploration not get stuck with huge distances)
-        far_d: float = 0.8
-        far_pen = (-torch.relu(dist - far_d)).clamp(-2.0, 0.0)
+        # XY reward: be near center (dominant in carry/drop)
+        temp_xy: float = 6.0
+        xy_arg = torch.clamp((d_xy / max(r_carry_need, eps)) ** 2, 0.0, 25.0)
+        r_xy = torch.exp(-temp_xy * xy_arg)
 
-        # ----------------------------
-        # Weighted sum (keep totals moderate)
-        # ----------------------------
-        w_xy: float = 1.5
-        w_dist: float = 1.0
-        w_above: float = 1.0
-        w_grasp: float = 2.0
-        w_lift: float = 6.0
-        w_success: float = 12.0
-        w_far: float = 0.2
+        # Drop reward: only meaningful when centered; encourage going low
+        # Use a smooth term that is ~1 when obj_z <= 0.1
+        temp_drop: float = 10.0
+        drop_arg = torch.clamp((torch.clamp(obj_z - 0.10, min=0.0) / 0.08) ** 2, 0.0, 25.0)
+        r_drop = torch.exp(-temp_drop * drop_arg)
+
+        # Hold reward (very weak): keep hand near object to reduce "throwing"
+        temp_hold: float = 4.0
+        hold_arg = torch.clamp((d_hand / 0.30) ** 2, 0.0, 25.0)
+        r_hold = torch.exp(-temp_hold * hold_arg)
+
+        # Orientation reward (weak): keep qx and qw near 0
+        qx = hand_quat[:, 0]
+        qw = hand_quat[:, 3]
+        ori_err2 = torch.clamp(qx * qx + qw * qw, 0.0, 25.0)
+        temp_ori: float = 2.5
+        r_ori = torch.exp(-temp_ori * ori_err2)
+
+        # -----------------------------
+        # Progress shaping (tiny, stable)
+        # -----------------------------
+        if not (hasattr(self, "helper_variable") and (self.helper_variable is not None) and (self.helper_variable.shape[0] == N)):
+            self.helper_variable = torch.zeros((N, 3), device=device)
+        elif self.helper_variable.shape[1] < 3:
+            hv = torch.zeros((N, 3), device=device)
+            hv[:, : self.helper_variable.shape[1]] = self.helper_variable
+            self.helper_variable = hv
+
+        prev_dxy = torch.nan_to_num(self.helper_variable[:, 0], nan=0.0, posinf=0.0, neginf=0.0)
+        prev_z = torch.nan_to_num(self.helper_variable[:, 1], nan=0.0, posinf=0.0, neginf=0.0)
+        prev_ready = torch.nan_to_num(self.helper_variable[:, 2], nan=0.0, posinf=0.0, neginf=0.0)
+
+        self.helper_variable[:, 0] = d_xy
+        self.helper_variable[:, 1] = obj_z
+        self.helper_variable[:, 2] = g_ready_drop
+
+        # Encourage reducing d_xy only when high (carry)
+        dxy_prog = torch.clamp(prev_dxy - d_xy, -0.05, 0.05) / 0.05  # [-1,1]
+        r_dxy_prog = torch.clamp(dxy_prog, -1.0, 1.0) * g_high
+
+        # Encourage lifting up only when below carry
+        dz = torch.clamp(obj_z - prev_z, -0.05, 0.05) / 0.05
+        r_dz_prog = torch.clamp(dz, -1.0, 1.0) * torch.clamp(z_below / 0.20, 0.0, 1.0)
+
+        # Encourage entering ready-to-drop
+        r_ready_prog = torch.clamp(g_ready_drop - prev_ready, -0.1, 0.1)
+
+        # -----------------------------
+        # Strong anti-exploit penalties
+        # -----------------------------
+        # Absolute height ceiling penalty (key fix):
+        # In these tasks, object z should stay near table/basket height (<~1m). Penalize beyond.
+        z_abs_ceiling: float = 1.2
+        z_abs_over = torch.clamp(obj_z - z_abs_ceiling, min=0.0)
+        p_abs_too_high = torch.clamp((z_abs_over / 0.6) ** 2, 0.0, 25.0)
+
+        # Relative too-high penalty (extra safety)
+        z_rel_over = torch.clamp(obj_z - (z_carry + 0.25), min=0.0)
+        p_rel_too_high = torch.clamp((z_rel_over / 0.4) ** 2, 0.0, 25.0)
+
+        # Penalize being far from basket especially while high (prevents "high but far" loophole)
+        p_far_xy = torch.clamp((d_xy / max(r_soft, eps)) ** 2, 0.0, 25.0)
+        p_far_xy_high = p_far_xy * g_high
+
+        # Penalize going low while not centered (bad drop)
+        far01 = torch.clamp(d_xy / max(r_soft, eps), 0.0, 1.0)
+        p_low_far = g_low * far01
+
+        # Penalize slip (object far from hand) more when high (likely thrown)
+        p_slip = torch.clamp(d_hand / 0.35, 0.0, 3.0) * g_high * (1.0 - success)
+
+        # -----------------------------
+        # Stage rewards (kept bounded)
+        # -----------------------------
+        rew_lift = 1.2 * r_lift + 0.1 * r_hold + 0.05 * r_ori
+        rew_carry = 1.6 * r_xy + 0.7 * r_z_band + 0.05 * r_hold + 0.05 * r_ori
+        rew_drop = 1.2 * r_xy + 1.4 * r_drop + 0.05 * r_ori
+
+        shaped = w_lift * rew_lift + w_carry * rew_carry + w_drop * rew_drop
+
+        # Success bonus: big and simple
+        temp_success: float = 3.0
+        r_success_bonus = torch.expm1(temp_success * success)  # 0 or expm1(3)=~19.09
+
+        # Small living penalty
+        time_penalty = torch.full((N,), 0.005, device=device)
 
         reward = (
-            w_xy * r_xy
-            + w_dist * r_dist
-            + w_above * r_above
-            + w_grasp * r_grasp_band
-            + w_lift * lift_combined
-            + w_success * success
-            + vel_pen
-            + w_far * far_pen
+            shaped
+            + 1.0 * r_success_bonus
+            + 0.03 * r_dxy_prog
+            + 0.02 * r_dz_prog
+            + 0.04 * r_ready_prog
+            - 0.80 * p_far_xy_high
+            - 0.20 * p_far_xy
+            - 2.50 * p_abs_too_high
+            - 0.80 * p_rel_too_high
+            - 1.20 * p_low_far
+            - 0.30 * p_slip
+            - time_penalty
         )
 
-        # Bound overall reward for stability
-        t_total: float = 10.0
-        reward = (t_total * torch.tanh(reward / t_total)).clamp(-t_total, t_total)
         reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
+        reward = torch.clamp(reward, -10.0, 10.0)
+        assert torch.isfinite(reward).all()
 
-        # Finite guard
-        if not torch.isfinite(reward).all():
-            reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
-
-        individual_rewards = {
-            "r_xy": r_xy,
-            "r_dist": r_dist,
-            "r_above": r_above,
-            "g_center": g_center,
-            "r_grasp_band": r_grasp_band,
-            "lift_progress": lift_progress,
-            "g_close": g_close,
-            "lift": lift_combined,
-            "raw_success": raw_success,
+        individual = {
+            # state
+            "d_xy": d_xy,
+            "d_hand": d_hand,
+            "obj_z": obj_z,
+            "inside_site": inside_site.float(),
+            "low_enough": low_enough.float(),
             "success": success,
-            "vel_pen": vel_pen,
-            "far_pen": far_pen,
-            "dist": dist,
-            "rel_xy": rel_xy,
-            "rel_z": rel_z,
-            "z_obj": z_obj,
+            # gates / stage weights
+            "g_high": g_high,
+            "g_center": g_center,
+            "g_ready_drop": g_ready_drop,
+            "g_low": g_low,
+            "w_lift": w_lift,
+            "w_carry": w_carry,
+            "w_drop": w_drop,
+            # rewards
+            "r_lift": r_lift,
+            "r_xy": r_xy,
+            "r_z_band": r_z_band,
+            "r_drop": r_drop,
+            "r_hold": r_hold,
+            "r_ori": r_ori,
+            "shaped": shaped,
+            "success_bonus": r_success_bonus,
+            # progress
+            "r_dxy_prog": r_dxy_prog,
+            "r_dz_prog": r_dz_prog,
+            "r_ready_prog": r_ready_prog,
+            # penalties
+            "p_abs_too_high": p_abs_too_high,
+            "p_rel_too_high": p_rel_too_high,
+            "p_far_xy": p_far_xy,
+            "p_far_xy_high": p_far_xy_high,
+            "p_low_far": p_low_far,
+            "p_slip": p_slip,
+            "time_penalty": time_penalty,
+            "reward": reward,
         }
-        return reward, individual_rewards
-    
+        return reward
 
 
     def get_target_object_to_hand_pose(self, init_states: dict):

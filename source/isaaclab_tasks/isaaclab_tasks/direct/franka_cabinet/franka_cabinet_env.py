@@ -524,5 +524,5 @@ class FrankaCabinetEnv(DirectRLEnv):
         return global_franka_rot, global_franka_pos, global_drawer_rot, global_drawer_pos
     
 
-    def run_replay(self):
+    def run_replay(self, log_dir:str, render:bool=False):
         pass
