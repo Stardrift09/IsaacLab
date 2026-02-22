@@ -177,18 +177,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # reset environment
     obs = env.get_observations()
     timestep = 0
-    warm_up = False
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
         # run everything in inference mode
         with torch.inference_mode():
             # agent stepping
-            if warm_up:
-                warm_up = False
-                #TODO: check if this is necessary
-                for _ in range(20):  # Adjust the number of warm-up steps as needed
-                    obs, _, _, _ = env.step(torch.zeros_like(policy(obs)))
             actions = policy(obs)
             # env stepping
             obs, _, dones, _ = env.step(actions)

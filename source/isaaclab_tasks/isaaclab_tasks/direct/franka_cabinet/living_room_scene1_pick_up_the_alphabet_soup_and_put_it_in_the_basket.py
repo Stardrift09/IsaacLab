@@ -472,14 +472,15 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
         self.robot_local_grasp_rot = robot_local_grasp_pose_rot.repeat((self.num_envs, 1)) # 4
 
         self.hand_link_idx = self._robot.find_bodies("panda_link7")[0][0]
-        self.left_finger_link_idx = self._robot.find_bodies("panda_leftfinger")[0][0]
-        self.right_finger_link_idx = self._robot.find_bodies("panda_rightfinger")[0][0]
+        self.left_finger_body_idx = self._robot.find_bodies("panda_leftfinger")[0][0]
+        self.right_finger_body_idx = self._robot.find_bodies("panda_rightfinger")[0][0]
 
         self.robot_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
         self.robot_grasp_pos = torch.zeros((self.num_envs, 3), device=self.device)
+        self.hand_quat = torch.zeros((self.num_envs, 4), device=self.device) 
         self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
-        self.quat_desired = torch.tensor([0, 0, 0, 1], device=self.device).repeat(self.num_envs, 1)
-
+        self.target_to_hand_vel = torch.zeros((self.num_envs, 3), device=self.device)
+        self.site_to_target_vel = torch.zeros((self.num_envs, 3), device=self.device)
 
     def _setup_scene(self):
         init_states = self.data['franka'][0]["init_state"] # this is from the first scene as set up. Init states of traj should be updated in reset_idx
@@ -682,13 +683,14 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
             / (self.robot_dof_upper_limits - self.robot_dof_lower_limits)
             - 1.0
         )
-        self.target_to_hand_pos = self.target_object.data.body_pos_w.squeeze(1) - self.robot_grasp_pos # n, 3
-        hand_quat = self._robot.data.body_quat_w[:, self.hand_link_idx]
-        # Forcing the 0th and 3th element of hand_quat to be 0 to point downwards. You can also penalize the rotation of the target object
-
         self.corners_target_obj_to_hand_pos =  (self.corners_target_obj - self.robot_grasp_pos.unsqueeze(1)).reshape(self.num_envs, -1) # corners to robot dist described in world coordinate.
+        self.target_to_hand_pos = self.target_object.data.body_pos_w.squeeze(1) - self.robot_grasp_pos # n, 3
+        self.hand_quat = self._robot.data.body_quat_w[:, self.hand_link_idx]
+        tcp_vel = (self._robot.data.body_link_lin_vel_w[:,self.left_finger_body_idx] + self._robot.data.body_link_lin_vel_w[:,self.right_finger_body_idx])/2
+        self.target_to_hand_vel = self.target_object.data.root_lin_vel_w - tcp_vel
+
         self.site_to_target_pos = self.target_site.data.root_pos_w - self.target_object.data.root_pos_w       
-        
+        self.site_to_target_vel = self.target_object.data.root_lin_vel_w - self.target_site.data.root_lin_vel_w
         # self.target_object_corners_world # you can read the three dim from the [2, 3] tensor storing min(first row) and max corner of the site in local env frame
         # you can check the direction where you enter with self.input_direction
         
@@ -698,8 +700,10 @@ class LivingRoomScene1PickUpTheAlphabetSoupAndPutItInTheBasket(DirectRLEnv):
                 self._robot.data.joint_vel * self.cfg.dof_velocity_scale,
                 self.corners_target_obj_to_hand_pos, # this should be small
                 self.target_to_hand_pos, # relative position from target object center to hand should be small
-                hand_quat, # be close to inital orientation (pointing downwards is good, allows z axis rotation
-                self.site_to_target_pos # Move to 20 CM high before moving to the site
+                self.hand_quat, # be close to inital orientation (pointing downwards is good, allows z axis rotation
+                self.site_to_target_pos, # Move to 20 CM high before moving to the site
+                self.target_to_hand_vel,
+                self.site_to_target_vel,
             ),
             dim=-1,
         )
