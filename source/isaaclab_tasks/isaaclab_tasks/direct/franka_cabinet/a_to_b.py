@@ -650,8 +650,8 @@ class AToB(DirectRLEnv):
             object_default_state = object.data.default_root_state.clone()[env_ids]
             if object_name == "asd":
                 random = sample_uniform(
-                    -0.125,
-                    0.125,
+                    -0.0125,
+                    0.0125,
                     (len(env_ids), 3),
                     self.device,
                 )

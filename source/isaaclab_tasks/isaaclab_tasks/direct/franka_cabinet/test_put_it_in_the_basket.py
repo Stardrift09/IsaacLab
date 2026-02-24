@@ -27,7 +27,7 @@ from torch.utils.tensorboard import SummaryWriter
 @configclass
 class TestPutItInTheBasketCfg(DirectRLEnvCfg):
     # env
-    episode_length_s = 8.3333  # 500 timesteps
+    episode_length_s = 8.65  # 519 timesteps
     decimation = 2
     action_space = 9
     observation_space = 25 # to modify
@@ -710,9 +710,16 @@ class TestPutItInTheBasket(DirectRLEnv):
 
 
     def run_replay(self, log_dir:str, render:bool=False):
+        libero_dt = 1/20
+        import numpy as np
         #TODO: make sure number of envs are enough for replay
         print(f"REPLAY LOG DIR {log_dir}")
         num_episodes = len(self.episodes)
+        if num_episodes > self.num_envs:
+            raise ValueError(
+                f"num_episodes ({num_episodes}) "
+                f"exceeds self.num_envs ({self.num_envs})"
+            )
         env_ids = torch.arange(num_episodes, device=self.device, dtype=torch.long)
         self._reset_idx(env_ids) # reset twice to make sure the states are correct
         # [num_envs, step, states]
@@ -728,18 +735,20 @@ class TestPutItInTheBasket(DirectRLEnv):
 
         # 2. Compute max episode length
         lengths = [len(ep["states"]) for ep in self.episodes]
-        lengths_tensor = torch.tensor(lengths,device=self.device)
-        # if self.debug:
-            # print(lengths)
         max_len = max(lengths)
-        # if self.debug:
-        #     print(f"max_len {max_len}")
-        #     print(f"num_envs: {self.num_envs}")
-        # 3. Determine state dimensions
-        # robot
-        # robot_pos_dim = len(self.episodes[0]["states"][0]["franka"]["pos"])      # 3
+        frequency_ratio = libero_dt / (self.cfg.decimation * self.cfg.sim.dt)
+        max_replay_episode_length = (max_len - 1) * frequency_ratio + 1
+        if max_replay_episode_length > self.max_episode_length:
+            raise ValueError(
+                f"Replay episode length ({max_replay_episode_length}) "
+                f"exceeds max_episode_length ({self.max_episode_length})"
+            )
+        
+        start_step = self.start_idx_in_episode * frequency_ratio # In case the task doesn't start from the beginning.
 
-        # actually I am not using this..
+        rest_episode_length = int(max_replay_episode_length - start_step)
+        # 3. Determine state dimensions
+        # robot_pos_dim = len(self.episodes[0]["states"][0]["franka"]["pos"])      # 3
         # robot_rot_dim = len(self.episodes[0]["states"][0]["franka"]["rot"])      # 4
         robot_dof_dim = len(self.episodes[0]["states"][0]["franka"]["dof_pos"])  # num_joints
 
@@ -751,18 +760,96 @@ class TestPutItInTheBasket(DirectRLEnv):
         # 4. Preallocate tensors
         # robot_pos = torch.zeros((num_episodes, max_len, robot_pos_dim))
         # robot_rot = torch.zeros((num_episodes, max_len, robot_rot_dim))
-        robot_dof = torch.zeros((self.num_envs, max_len, robot_dof_dim),device=self.device,dtype=torch.float32)
 
-        object_pos = torch.zeros((self.num_envs, max_len, num_objects, object_pos_dim),device=self.device,dtype=torch.float32)
-        object_rot = torch.zeros((self.num_envs, max_len, num_objects, object_rot_dim),device=self.device,dtype=torch.float32)
 
-        padding_mask = torch.ones((self.num_envs, max_len),device=self.device, dtype=torch.bool)
+        robot_dof = torch.zeros((self.num_envs,  rest_episode_length, robot_dof_dim),device=self.device,dtype=torch.float32)
+        object_pos = torch.zeros((self.num_envs,  rest_episode_length, num_objects, object_pos_dim),device=self.device,dtype=torch.float32)
+        object_rot = torch.zeros((self.num_envs,  rest_episode_length, num_objects, object_rot_dim),device=self.device,dtype=torch.float32)
+        padding_mask = torch.ones((self.num_envs,  rest_episode_length),device=self.device, dtype=torch.bool)
+        
+
+        def lerp(a, b, u):
+            return (1.0 - u) * a + u * b
+
+        def slerp(q0, q1, u, eps=1e-8):
+            """
+            q0, q1: quaternions as (4,) arrays in (x,y,z,w) format (your data looks like that)
+            """
+            q0 = np.asarray(q0, dtype=np.float64)
+            q1 = np.asarray(q1, dtype=np.float64)
+
+            # Normalize (safe)
+            q0 = q0 / (np.linalg.norm(q0) + eps)
+            q1 = q1 / (np.linalg.norm(q1) + eps)
+
+            # Ensure shortest path: if dot < 0, negate q1
+            dot = np.dot(q0, q1)
+            if dot < 0.0:
+                q1 = -q1
+                dot = -dot
+
+            # If very close, fall back to lerp + renormalize
+            if dot > 0.9995:
+                q = lerp(q0, q1, u)
+                return (q / (np.linalg.norm(q) + eps)).astype(np.float64)
+
+            theta_0 = np.arccos(np.clip(dot, -1.0, 1.0))
+            sin_theta_0 = np.sin(theta_0)
+            theta = theta_0 * u
+            sin_theta = np.sin(theta)
+
+            s0 = np.sin(theta_0 - theta) / (sin_theta_0 + eps)
+            s1 = sin_theta / (sin_theta_0 + eps)
+            return (s0 * q0 + s1 * q1).astype(np.float64)
+
+
+        def interp_state(s0, s1, u):
+            out = {}
+
+            # --- franka dof ---
+            out["franka"] = {
+                "pos": lerp(np.array(s0["franka"]["pos"]), np.array(s1["franka"]["pos"]), u).tolist(),
+                "rot": slerp(s0["franka"]["rot"], s1["franka"]["rot"], u).tolist(),
+                "dof_pos": {}
+            }
+
+            # Keep DOF key order consistent by iterating keys from s0
+            for k in s0["franka"]["dof_pos"].keys():
+                v0 = float(np.array(s0["franka"]["dof_pos"][k]).reshape(-1)[0])
+                v1 = float(np.array(s1["franka"]["dof_pos"][k]).reshape(-1)[0])
+                out["franka"]["dof_pos"][k] = np.array([lerp(v0, v1, u)], dtype=np.float64)
+
+            # --- objects (everything besides franka) ---
+            for name in s0.keys():
+                if name == "franka":
+                    continue
+                out[name] = {
+                    "pos": lerp(np.array(s0[name]["pos"]), np.array(s1[name]["pos"]), u).tolist(),
+                    "rot": slerp(s0[name]["rot"], s1[name]["rot"], u).tolist()
+                }
+
+            return out
+
+        def insert_two_between(states):
+            """
+            states: list of state dicts length T
+            returns: list length (T-1)*3 + 1
+            """
+            new_states = []
+            for t in range(len(states) - 1):
+                s0, s1 = states[t], states[t+1]
+                new_states.append(s0)
+                new_states.append(interp_state(s0, s1, 1/3))
+                new_states.append(interp_state(s0, s1, 2/3))
+            new_states.append(states[-1])
+            return new_states
         
         # 5. Fill tensors
         with torch.inference_mode():
             for env_idx, ep in enumerate(self.episodes): # each episode
-                ep_len = lengths[env_idx]
-
+                ep["states"] = ep["states"][self.start_idx_in_episode:]
+                ep["states"] = insert_two_between(ep["states"])
+                ep_len = len(ep["states"])  # updated length
                 for t, state in enumerate(ep["states"]):
                     # robot
                     # robot_pos[env_idx, t] = torch.tensor(state["franka"]["pos"])
@@ -784,7 +871,7 @@ class TestPutItInTheBasket(DirectRLEnv):
 
             # Next step: Set states, call reward function, log
 
-            for t in range(max_len):
+            for t in range(rest_episode_length):
                 # set states
                 joint_pos = robot_dof[:,t,:]
                 # print(joint_pos[0,-2:])
@@ -806,7 +893,7 @@ class TestPutItInTheBasket(DirectRLEnv):
                         self.sim.render()
                 self.scene.update(dt=self.physics_dt)
 
-                detect_grasp = True
+                detect_grasp = False
                 if detect_grasp:
                     # update self.robot_grasp_pos
                     _,_ = self._get_dones()
@@ -838,15 +925,15 @@ class TestPutItInTheBasket(DirectRLEnv):
                         if key not in eureka_episode_sums:
                             eureka_episode_sums[key] = torch.zeros(num_episodes, device=self.device)
                         eureka_episode_sums[key] += rewards_dict_replay[key]
-
+                else:
+                    raise NotImplementedError(
+                        f"{self.__class__.__name__} must implement `_get_rewards_eureka()` "
+                        "when using Eureka reward replay."
+                    )
 
                 # After all replay is done, devide by episode length, and record
             for k in eureka_episode_sums.keys():
-                # max_episode_length_s
-                libero_dt = 1/20 # Not using this, not comparable
-                max_episode_length_libero = 200
-                max_episode_length = 500
-                per_ep_value = eureka_episode_sums[k] * max_episode_length / max_episode_length_libero /self.max_episode_length_s # Should also consider dt and maybe interpolate velocity/simulate
+                per_ep_value = eureka_episode_sums[k] /self.max_episode_length_s
                 writer.add_scalar("Replay/"+k +"_mean", per_ep_value.mean().item(), t) 
                 writer.add_scalar("Replay/"+k +"_std", per_ep_value.std().item(), t) 
 
