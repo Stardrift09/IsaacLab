@@ -482,6 +482,7 @@ class AToB(DirectRLEnv):
         self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
         self.target_to_hand_vel = torch.zeros((self.num_envs, 3), device=self.device)
         self.site_to_target_vel = torch.zeros((self.num_envs, 3), device=self.device)
+        self.manipulability = torch.zeros((self.num_envs), device=self.device)
 
     def _setup_scene(self):
         init_states = self.data['franka'][0]["init_state"] # this is from the first scene as set up. Init states of traj should be updated in reset_idx
@@ -623,9 +624,9 @@ class AToB(DirectRLEnv):
         truncated = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, truncated
     
-    def _get_rewards(self) -> torch.Tensor:
+    # def _get_rewards(self) -> torch.Tensor:
 
-        return self._compute_rewards(self.actions,self.cfg.action_penalty_scale,)
+    #     return self._compute_rewards(self.actions,self.cfg.action_penalty_scale,)
 
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -734,7 +735,7 @@ class AToB(DirectRLEnv):
         rewards = (
             - action_penalty_scale * action_penalty
         )
-
+        self.manipulability = self._compute_manipulability(self._robot._ALL_INDICES) # Always have reward on this to have correct robot motion
         self.extras["log"] = {
             "action_penalty": (-action_penalty_scale * action_penalty).mean(),
         }
@@ -898,167 +899,74 @@ class AToB(DirectRLEnv):
 
 
 
-    def _get_rewards_test(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def _get_rewards(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         import torch
 
         device = self.device
         eps: float = 1e-6
 
-        # ----------------------------
-        # Read & sanitize state
-        # ----------------------------
-        obj_pos = torch.nan_to_num(self.target_object.data.root_pos_w, nan=0.0, posinf=0.0, neginf=0.0)  # (N,3)
-        ee_pos = torch.nan_to_num(self.robot_grasp_pos, nan=0.0, posinf=0.0, neginf=0.0)  # (N,3)
+        # --- Core signals (sanitize) ---
+        # Use precomputed relative vector if available; otherwise compute directly.
+        if hasattr(self, "target_to_hand_pos"):
+            rel = self.target_to_hand_pos
+        else:
+            rel = self.target_pos - self.robot_grasp_pos
+        rel = torch.nan_to_num(rel, nan=0.0, posinf=0.0, neginf=0.0)
 
-        rel = torch.nan_to_num(obj_pos - ee_pos, nan=0.0, posinf=0.0, neginf=0.0)  # obj - ee
-        rel_xy = torch.linalg.norm(rel[:, :2], dim=-1).clamp(min=0.0)
-        rel_z = rel[:, 2].clamp(min=-2.0, max=2.0)
-        dist = torch.linalg.norm(rel, dim=-1).clamp(min=0.0)
+        dist = torch.linalg.norm(rel, dim=-1)
+        dist = torch.nan_to_num(dist, nan=1e3, posinf=1e3, neginf=1e3)
 
-        z_obj = obj_pos[:, 2].clamp(min=-2.0, max=2.0)
+        # Success metric (matches provided definition)
+        tolerance = torch.tensor(0.1, device=device)
+        success = (dist < tolerance).to(torch.float32)
 
+        # --- Reward components ---
+        # Smooth distance shaping (bounded in (0,1])
+        temp_dist: float = 0.05
+        r_dist = torch.exp(-dist / temp_dist)
+
+        # Optional action/joint-velocity penalty for stability
         joint_vel = torch.nan_to_num(self._robot.data.joint_vel, nan=0.0, posinf=0.0, neginf=0.0)
-        vel_l2 = torch.sqrt(torch.sum(joint_vel * joint_vel, dim=-1) + eps)
+        vel_mag = torch.linalg.norm(joint_vel, dim=-1)
+        vel_mag = torch.nan_to_num(vel_mag, nan=0.0, posinf=1e3, neginf=1e3)
+        temp_vel: float = 2.0
+        r_smooth = torch.exp(-vel_mag / temp_vel)  # higher when moving smoothly
 
-        # -------------------------------------------------------------------------
-        # Analysis-driven rewrite:
-        # - Your logs show many components are constant across training (reach/corners/orientation/above/etc.).
-        #   That indicates those terms were either coming from a different reward function in your run
-        #   or were effectively saturated/decoupled from action.
-        # - Most critically: task_score/success/lift stayed 0. This means the agent never triggers lift.
-        # - Also: rel_z is very negative (~ -4.5), and dist/rel_xy can get huge -> the agent often places
-        #   the hand far above the object (EE z >> obj z) and still receives large dense rewards due to
-        #   saturation / scaling issues in previous shaping.
-        #
-        # New reward design goals:
-        #   (1) Keep ALL dense terms in [0, 1] with gentle temperatures (no >50 magnitudes).
-        #   (2) Strongly encourage "hand slightly ABOVE object" first (safe approach).
-        #   (3) Then encourage descending to a "grasp band" (EE slightly BELOW object center),
-        #       but only after XY is aligned (prevents descending far away).
-        #   (4) Encourage lift based on object height ALWAYS (not gated on unknown grasp signal),
-        #       but scale it up when the EE is close to object (so lifting while not near gives less).
-        #   (5) Add a strong sparse success bonus at z_obj > 0.4.
-        # -------------------------------------------------------------------------
+        # Big success bonus to strongly prioritize task completion
+        success_bonus = success * 300.0
 
-        # ----------------------------
-        # Shaping: XY centering (dense)
-        # ----------------------------
-        # Temperatures chosen to avoid saturation too early, still providing gradient from far away.
-        t_xy: float = 0.10
-        r_xy = torch.exp(-rel_xy / (t_xy + eps)).clamp(0.0, 1.0)
+        # Combine
+        reward = 1.0 * r_dist + 0.1 * r_smooth + success_bonus
 
-        # 3D distance shaping (so it can't get reward by only matching XY while being meters away in Z)
-        t_dist: float = 0.25
-        r_dist = torch.exp(-dist / (t_dist + eps)).clamp(0.0, 1.0)
-
-        # ----------------------------
-        # Shaping: approach from above (EE above object by ~8cm)
-        # rel_z = obj_z - ee_z. For EE above: rel_z negative.
-        # Target rel_z ~= -0.08.
-        # ----------------------------
-        above_target: float = -0.08
-        above_err = (rel_z - above_target).abs().clamp(0.0, 2.0)
-        t_above: float = 0.10
-        r_above = torch.exp(-above_err / (t_above + eps)).clamp(0.0, 1.0)
-
-        # Gate for being reasonably centered before we reward descending/grasp band
-        xy_gate_center: float = 0.06
-        xy_gate_temp: float = 0.02
-        g_center = torch.sigmoid((xy_gate_center - rel_xy) / (xy_gate_temp + eps)).clamp(0.0, 1.0)
-
-        # ----------------------------
-        # Shaping: "grasp band" (EE slightly below object center by ~2cm)
-        # Target rel_z ~= +0.02.
-        # Only reward when centered in XY (prevents diving elsewhere).
-        # ----------------------------
-        grasp_target: float = 0.02
-        grasp_err = (rel_z - grasp_target).abs().clamp(0.0, 2.0)
-        t_grasp: float = 0.06
-        r_grasp_band = (torch.exp(-grasp_err / (t_grasp + eps)) * g_center).clamp(0.0, 1.0)
-
-        # ----------------------------
-        # Lift reward: based on object height, but boosted when EE is near object.
-        # This avoids the "never lift because grasp not detected" failure mode.
-        # ----------------------------
-        z_success: float = 0.40
-        z_start: float = 0.10
-        lift_progress = ((z_obj - z_start) / (z_success - z_start + eps)).clamp(0.0, 1.0)
-
-        # Proximity boost: if the hand stays near while object rises, likely actually grasping.
-        close_dist: float = 0.08
-        close_temp: float = 0.02
-        g_close = torch.sigmoid((close_dist - dist) / (close_temp + eps)).clamp(0.0, 1.0)
-
-        # Smooth but sharper near success to push crossing 0.4
-        r_lift = (lift_progress**3).clamp(0.0, 1.0)
-
-        # Combine: always some lift reward, but much larger when close
-        lift_combined = (0.25 * r_lift + 0.75 * (r_lift * g_close)).clamp(0.0, 1.0)
-
-        # ----------------------------
-        # Success bonus
-        # ----------------------------
-        raw_success = (z_obj > z_success).to(torch.float32)
-        # Mildly prefer being close at success, but don't over-gate (avoid missing reward on noisy contact)
-        success = (raw_success * (0.5 + 0.5 * g_close)).clamp(0.0, 1.0)
-
-        # ----------------------------
-        # Penalties / regularization
-        # ----------------------------
-        vel_pen_scale: float = 0.005
-        vel_pen = (-vel_pen_scale * vel_l2).clamp(-1.0, 0.0)
-
-        # Penalize being extremely far (helps exploration not get stuck with huge distances)
-        far_d: float = 0.8
-        far_pen = (-torch.relu(dist - far_d)).clamp(-2.0, 0.0)
-
-        # ----------------------------
-        # Weighted sum (keep totals moderate)
-        # ----------------------------
-        w_xy: float = 1.5
-        w_dist: float = 1.0
-        w_above: float = 1.0
-        w_grasp: float = 2.0
-        w_lift: float = 6.0
-        w_success: float = 12.0
-        w_far: float = 0.2
-
-        reward = (
-            w_xy * r_xy
-            + w_dist * r_dist
-            + w_above * r_above
-            + w_grasp * r_grasp_band
-            + w_lift * lift_combined
-            + w_success * success
-            + vel_pen
-            + w_far * far_pen
-        )
-
-        # Bound overall reward for stability
-        t_total: float = 10.0
-        reward = (t_total * torch.tanh(reward / t_total)).clamp(-t_total, t_total)
+        # Safety: ensure finite
         reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Finite guard
-        if not torch.isfinite(reward).all():
-            reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
-
         individual_rewards = {
-            "r_xy": r_xy,
-            "r_dist": r_dist,
-            "r_above": r_above,
-            "g_center": g_center,
-            "r_grasp_band": r_grasp_band,
-            "lift_progress": lift_progress,
-            "g_close": g_close,
-            "lift": lift_combined,
-            "raw_success": raw_success,
+            "dist_exp": r_dist,
+            "smooth_exp": r_smooth,
+            "success_bonus": success_bonus,
             "success": success,
-            "vel_pen": vel_pen,
-            "far_pen": far_pen,
             "dist": dist,
-            "rel_xy": rel_xy,
-            "rel_z": rel_z,
-            "z_obj": z_obj,
         }
-        return reward, individual_rewards
+        return reward
+
+
+    def _compute_manipulability(self, env_ids: torch.Tensor):
+        debug=False
+        jacobians = self._robot.root_physx_view.get_jacobians() # shape [num_envs, num_bodies, task_space, joint_space]
+
+        left_finger_jacobians = jacobians[:, self.left_finger_joint_idx]
+        right_finger_jacobians = jacobians[:, self.right_finger_joint_idx]
+        # if debug:
+        #     print(self._robot.num_bodies)
+        #     print(jacobians.shape)
+        #     print(left_finger_jacobians[0],right_finger_jacobians[0])
+
+            
+        finger_jacobians = (left_finger_jacobians + right_finger_jacobians)/2
+        j_j_T = finger_jacobians @ finger_jacobians.transpose(-1, -2)  # [E, 6, 6]
+        det = torch.linalg.det(j_j_T)
+        m = torch.sqrt(torch.clamp(det, min=1e-12))
+        return m
+        # Should handle the case for reset
+        # Compare the analytical solution and that from autograd
