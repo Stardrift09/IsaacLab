@@ -598,12 +598,24 @@ class TestPutItInTheBasket(DirectRLEnv):
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
 
-        right_contact_sensor_cfg = ContactSensorCfg(
-            prim_path="/World/envs/env_.*/alphabet_soup/object", update_period=0.0, history_length=10, 
-            track_air_time=True
+        # right_contact_sensor_cfg = ContactSensorCfg(
+        #     prim_path="/World/envs/env_.*/alphabet_soup/object", update_period=0.0, history_length=10, 
+        #     track_air_time=True
+        # )
+        left_contact_sensor_cfg = ContactSensorCfg(
+            prim_path="/World/envs/env_.*/Robot/panda_leftfinger", update_period=0.0, history_length=10, 
+            track_air_time=True, filter_prim_paths_expr=["/World/envs/env_.*/alphabet_soup/object"],
         )
+        right_contact_sensor_cfg = ContactSensorCfg(
+            prim_path="/World/envs/env_.*/Robot/panda_rightfinger", update_period=0.0, history_length=10, 
+            track_air_time=True, filter_prim_paths_expr=["/World/envs/env_.*/alphabet_soup/object"],
+        )
+        self._left_contact_sensors = ContactSensor(left_contact_sensor_cfg)
         self._right_contact_sensors = ContactSensor(right_contact_sensor_cfg)
+        self.scene.sensors["left_contact_sensor"] = self._left_contact_sensors
+        self._left_contact_sensors.set_debug_vis(True)
         self.scene.sensors["right_contact_sensor"] = self._right_contact_sensors
+        self._right_contact_sensors.set_debug_vis(True)
 
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -640,9 +652,9 @@ class TestPutItInTheBasket(DirectRLEnv):
         # print(f"low_enough{low_enough}")
         return terminated, truncated
     
-    # def _get_rewards(self) -> torch.Tensor:
+    def _get_rewards(self) -> torch.Tensor:
 
-    #     return self._compute_rewards(self.actions,self.cfg.action_penalty_scale,)
+        return self._compute_rewards(self.actions,self.cfg.action_penalty_scale,)
 
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -694,9 +706,9 @@ class TestPutItInTheBasket(DirectRLEnv):
         site_to_target_vel = self.target_object.data.root_lin_vel_w - self.target_site.data.root_lin_vel_w
         # self.target_site_corners_world # you can read the three dim from the [2, 3] tensor storing min(first row) and max corner of the site in local env frame
         # you can check the direction where you enter with self.input_direction
+        grasped = self._grasp_detection().float() # [num_envs, 1] 1 means two fingers have contact force against object, thereby grasping
 
-
-        self.manipulability = self._compute_manipulability(self._robot._ALL_INDICES) # Always have reward on this to have correct robot motion
+        self.manipulability = self._compute_manipulability(self._robot._ALL_INDICES) # [num_envs] Always have reward on this to have correct robot motion
         obs = torch.cat(
             (
                 dof_pos_scaled,
@@ -707,10 +719,14 @@ class TestPutItInTheBasket(DirectRLEnv):
                 self.site_to_target_pos, # relative position in x y from target site to target object
                 target_to_hand_vel,
                 site_to_target_vel,
+                grasped, # 1 or 0, indicating whether is grasped or not.
             ),
             dim=-1,
         )
-
+        # print(self.target_object.data.root_pos_w[0,2])
+        # print(self.scene["left_contact_sensor"].data.current_contact_time)
+        # print(self.scene["right_contact_sensor"].data.current_contact_time)
+        # print(self.scene.sensors["finger_contact_sensor"].data.force_matrix_w)
         return {"policy": torch.clamp(obs, -5.0, 5.0)}
 
 
@@ -828,7 +844,6 @@ class TestPutItInTheBasket(DirectRLEnv):
             s0 = np.sin(theta_0 - theta) / (sin_theta_0 + eps)
             s1 = sin_theta / (sin_theta_0 + eps)
             return (s0 * q0 + s1 * q1).astype(np.float64)
-
 
         def interp_state(s0, s1, u):
             out = {}
@@ -989,7 +1004,7 @@ class TestPutItInTheBasket(DirectRLEnv):
 
 
 
-    def _get_rewards(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def _get_rewards_test(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         import torch
 
         eps = 1e-6
@@ -1216,8 +1231,14 @@ class TestPutItInTheBasket(DirectRLEnv):
         return m
         # Should handle the case for reset
         # Compare the analytical solution and that from autograd
+
+
     def _grasp_detection(self):
-        pass
+        grasped_left = self.scene["left_contact_sensor"].data.current_contact_time > 0
+        grasped_right = self.scene["right_contact_sensor"].data.current_contact_time > 0
+        grasped = grasped_left & grasped_right
+        return grasped
+    
 
     def _get_rewards_test(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         import torch
