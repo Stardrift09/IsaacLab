@@ -59,7 +59,7 @@ class TestPutItInTheBasketCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=2048, env_spacing=3.0, replicate_physics=True, clone_in_fabric=True, 
+        num_envs=1024, env_spacing=3.0, replicate_physics=True, clone_in_fabric=False, 
     )
 
 
