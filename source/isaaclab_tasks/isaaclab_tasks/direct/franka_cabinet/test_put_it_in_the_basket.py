@@ -25,8 +25,9 @@ from torch.utils.tensorboard import SummaryWriter
 # from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.sensors.contact_sensor.contact_sensor import ContactSensor
 from isaaclab.sensors import ContactSensorCfg
-import pdb
 
+import pdb
+from isaaclab_eureka.utils import eureka_root_dir, read_pkl
 
 @configclass
 class TestPutItInTheBasketCfg(DirectRLEnvCfg):
@@ -36,14 +37,7 @@ class TestPutItInTheBasketCfg(DirectRLEnvCfg):
     action_space = 9
     observation_space = 25 # to modify
     state_space = 0
-    # train_with_isaaclab =True
 
-    # if train_with_isaaclab:
-    from isaaclab_eureka.utils import eureka_root_dir
-    root = eureka_root_dir()
-    path = f"{root}/libero/trajs/libero90/libero_90_living_room_scene1_pick_up_the_alphabet_soup_and_put_it_in_the_basket_traj_v2.pkl"
-    # else:
-    #     path = "libero/trajs/libero90/libero_90_living_room_scene1_pick_up_the_alphabet_soup_and_put_it_in_the_basket_traj_v2.pkl"
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,
@@ -216,17 +210,37 @@ class TestPutItInTheBasket(DirectRLEnv):
     cfg: TestPutItInTheBasketCfg
 
     def __init__(self, cfg: TestPutItInTheBasketCfg, render_mode: str | None = None, **kwargs):
-        self.debug = False  
-        self.path = cfg.path # scene init is called in super
-        self.root = cfg.root
-        from isaaclab_eureka.utils import read_pkl
-        self.data = read_pkl(self.path) 
-        # [num_envs, step, states]
-        # first loop over, add padding, then stack.
-        self.episodes = self.data["franka"]
-        self.target_object_name = "alphabet_soup"
+    
+
+
+        self.root = eureka_root_dir()
+        self.target_object_name = "ketchup"
         self.target_site_name = "basket"
         self.input_direction = 2 # z axis
+        self.path = f"{self.root}/libero/trajs/libero90/libero_90_living_room_scene1_pick_up_the_{self.target_object_name}_and_put_it_in_the_basket_traj_v2.pkl"
+
+        start_idx_in_episode_dict = {
+            "alphabet_soup":80,
+            "cream_cheese":70,
+            "ketchup":100,
+        }
+        self.start_idx_in_episode = start_idx_in_episode_dict[self.target_object_name] # for cream_cheese
+        # self.start_idx_in_episode = 80 # For living room scene 1 pick up the alphabet soup
+
+        # some calculations to get max episode length from demonstrations
+        self.data = read_pkl(self.path) 
+        self.episodes = self.data["franka"]
+        lengths = [len(ep["states"]) for ep in self.episodes]
+        max_len = max(lengths) # not subtracting start idx from this to let RL explore
+
+        frequency_ratio = 3
+        episode_length = (max_len - 1) * frequency_ratio + 1
+        cfg.episode_length_s = episode_length * cfg.sim.dt * cfg.decimation # handling this dynamically
+        
+        # pdb.set_trace()
+
+        self.debug = False  
+
         super().__init__(cfg, render_mode, **kwargs)
         self.sample = self.episodes[0]["states"][0].copy()
         self.sample.pop("franka", None)
@@ -274,8 +288,7 @@ class TestPutItInTheBasket(DirectRLEnv):
         # min_wc = bbox.GetRange().GetMin()
         # max_wc = bbox.GetRange().GetMax()
 
-        # import pdb
-        # pdb.set_trace()
+
 
         # compute local corners once from env_0 then broadcast to all envs and transform per-env as needed
         prim = stage.GetPrimAtPath(f"/World/envs/env_0/{self.target_object_name}/object")
@@ -325,8 +338,7 @@ class TestPutItInTheBasket(DirectRLEnv):
         self.local_centers = torch.zeros_like(self.local_centers_init) # [num_envs, 1, 3]
         self.corners_target_obj = torch.zeros_like(self.local_corners_init)
         self.corners_target_obj_to_hand_pos = torch.zeros((self.num_envs, 24), device=self.device) # hard coded
-        # import pdb
-        # pdb.set_trace()
+
 
 
         # prim = stage.GetPrimAtPath(f"/World/envs/env_0/{self.target_object_name}/object")
@@ -447,10 +459,6 @@ class TestPutItInTheBasket(DirectRLEnv):
         if self.target_site_radius.item() < 0:
             self.target_site_radius = torch.tensor(0.02)
         self.input_direction = torch.tensor([0, 0, 1], device=self.device) # z axis
-        debug = False
-        if debug:
-            import pdb
-            pdb.set_trace()
 
         hand_pose = get_env_local_pose(
             self.scene.env_origins[0],
@@ -500,16 +508,15 @@ class TestPutItInTheBasket(DirectRLEnv):
     def _setup_scene(self):
         # init_states = self.data['franka'][0]["init_state"] # this is from the first scene as set up. Init states of traj should be updated in reset_idx
         # init_states = self.data['franka'][0]["states"][100]
-
-        self.start_idx_in_episode = 80
-        init_states = self.data['franka'][0]["states"][80] # 92 in the air. Used 100 For two round training, now use 80, starting from ground
+        # self.start_idx_in_episode = 70 # for cream_cheese
+        # self.start_idx_in_episode = 80 # For living room scene 1 pick up the alphabet soup
+        init_states = self.data['franka'][0]["states"][self.start_idx_in_episode] # 92 in the air. Used 100 For two round training, now use 80, starting from ground
         robot_data = init_states['franka'] # seems that joint pos for isaaclab is always positive
         robot_joint_pos = robot_data["dof_pos"]
         # print(f"robot_joint_pos:{robot_joint_pos}")
         robot_joint_pos['panda_finger_joint2'] = robot_joint_pos['panda_finger_joint1']
         # print(f"robot_joint_pos:{robot_joint_pos}")
         robot_joint_pos = {k: v.item() for k, v in robot_joint_pos.items()}
-
         robot_cfg = ArticulationCfg(
             prim_path="/World/envs/env_.*/Robot",
             spawn=sim_utils.UsdFileCfg(
@@ -598,17 +605,13 @@ class TestPutItInTheBasket(DirectRLEnv):
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
 
-        # right_contact_sensor_cfg = ContactSensorCfg(
-        #     prim_path="/World/envs/env_.*/alphabet_soup/object", update_period=0.0, history_length=10, 
-        #     track_air_time=True
-        # )
         left_contact_sensor_cfg = ContactSensorCfg(
             prim_path="/World/envs/env_.*/Robot/panda_leftfinger", update_period=0.0, history_length=10, 
-            track_air_time=True, filter_prim_paths_expr=["/World/envs/env_.*/alphabet_soup/object"],
+            track_air_time=True, filter_prim_paths_expr=[f"/World/envs/env_.*/{self.target_object_name}/object"],
         )
         right_contact_sensor_cfg = ContactSensorCfg(
             prim_path="/World/envs/env_.*/Robot/panda_rightfinger", update_period=0.0, history_length=10, 
-            track_air_time=True, filter_prim_paths_expr=["/World/envs/env_.*/alphabet_soup/object"],
+            track_air_time=True, filter_prim_paths_expr=[f"/World/envs/env_.*/{self.target_object_name}/object"],
         )
         self._left_contact_sensors = ContactSensor(left_contact_sensor_cfg)
         self._right_contact_sensors = ContactSensor(right_contact_sensor_cfg)
@@ -653,8 +656,9 @@ class TestPutItInTheBasket(DirectRLEnv):
         return terminated, truncated
     
     def _get_rewards(self) -> torch.Tensor:
-
-        return self._compute_rewards(self.actions,self.cfg.action_penalty_scale,)
+        rewards, individual_rewards = self._get_rewards_test()
+        self.extras["log"] = individual_rewards
+        return rewards
 
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -889,7 +893,7 @@ class TestPutItInTheBasket(DirectRLEnv):
         # 5. Fill tensors
         with torch.inference_mode():
             for env_idx, ep in enumerate(self.episodes): # each episode
-                new_ep = ep["states"][self.start_idx_in_episode:] # avoid changing in-place
+                new_ep = ep["states"][self.start_idx_in_episode:].copy() # avoid changing in-place
                 new_ep = insert_two_between(new_ep)
                 ep_len = len(new_ep)  # updated length
                 for t, state in enumerate(new_ep):
@@ -942,7 +946,7 @@ class TestPutItInTheBasket(DirectRLEnv):
                     diff = self.target_object.data.body_pos_w.squeeze(1) - self.robot_grasp_pos
                     # print(diff[0]) # play the first episode to check the constant object-hand distance
                     diff_norm = torch.norm(diff, dim=-1)  # shape: (n,)
-                    if diff_norm[0] < 0.01 and self.target_object.data.root_pos_w[0,2] > 0.1: # check if the grasp is stable (object-hand distance is small) and the object is lifted up (z is large), which should happen at the end of episode when the agent learns to lift up the object while keeping a stable grasp
+                    if self.target_object.data.root_pos_w[0,2] > 0.09: # check if the grasp is stable (object-hand distance is small) and the object is lifted up (z is large), which should happen at the end of episode when the agent learns to lift up the object while keeping a stable grasp
                         print(f"timestep {t}: object in the air")
                     print(diff_norm[0]) # should be small and constant if the grasp is stable, which is the case for most of the episode, except at the end when the object is lifted up and the grasp is broken. This matches with the observation that the agent learns to keep a stable grasp and lift up the object at the end of training.
                     print(self.target_object.data.root_pos_w[0,2]) # also check the object position, should be lifted up at the end of episode
@@ -1004,184 +1008,6 @@ class TestPutItInTheBasket(DirectRLEnv):
 
 
 
-    def _get_rewards_test(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        import torch
-
-        eps = 1e-6
-        device = self.device
-
-        # -----------------------------
-        # Read / sanitize state
-        # -----------------------------
-        obj_pos = torch.nan_to_num(self.target_object.data.root_pos_w, nan=0.0, posinf=0.0, neginf=0.0)  # (N,3)
-        site_pos = torch.nan_to_num(self.target_site.data.root_pos_w, nan=0.0, posinf=0.0, neginf=0.0)  # (N,3)
-        hand_pos = torch.nan_to_num(self.robot_grasp_pos, nan=0.0, posinf=0.0, neginf=0.0)  # (N,3)
-
-        obj_xy = obj_pos[:, :2]
-        site_xy = site_pos[:, :2]
-        xy_vec = obj_xy - site_xy
-        dist2_xy = torch.clamp((xy_vec * xy_vec).sum(dim=-1), min=0.0)
-        dist_xy = torch.sqrt(dist2_xy + eps)
-
-        # Basket height model:
-        # site z is bottom center; task wants clearance above rim by 10cm. We approximate rim at bottom + 0.10
-        rim_z = site_pos[:, 2] + 0.10
-        clearance = obj_pos[:, 2] - rim_z  # >0 means safely above rim+10cm
-
-        # Provided success metric
-        radius = float(self.target_site_radius)
-        inside_site = dist2_xy < (radius * radius)
-        low_enough = obj_pos[:, 2] < 0.1
-        success = inside_site & low_enough
-
-        # -----------------------------
-        # Key issue in previous reward (from logs):
-        # - Huge/near-constant exp rewards (r_lift_height, r_descend, r_grasp, r_joint_margin) -> reward hacking.
-        # - XY shaping effectively off (r_xy_close ~0) because dist_xy huge and temp too small; also inside_site ~0.
-        # - Orientation term collapsed to 0 because "init quat = zeros" invalid -> always bad.
-        # New design:
-        #   1) Use bounded, scale-stable shaping in [0,1] (mostly exp(-err/temp)).
-        #   2) Make XY approach the primary dense objective early (bigger temp).
-        #   3) Use soft stage weights but avoid multiplying by hard indicators that freeze gradients.
-        #   4) Orientation: encourage "no rotation" by staying close to a *fixed reference* computed from current
-        #      at reset is not available; use a robust "keep pointing down" proxy from hint: penalize (qx,qw).
-        #   5) Add a strong "inside & low" sparse bonus, but keep dense terms informative.
-        # -----------------------------
-
-        # -----------------------------
-        # Soft stage weights (no hard gates)
-        # -----------------------------
-        # w_clear ~ 0 when below clearance, -> 1 when above
-        temp_stage_clear = 0.02
-        w_clear = torch.sigmoid(torch.clamp(clearance / temp_stage_clear, -20.0, 20.0))
-
-        # w_align_xy ~ 0 far, -> 1 near basket opening
-        # Choose a scale around basket radius / few cm; use 4cm for smoothness.
-        temp_stage_xy = 0.04
-        w_align_xy = torch.exp(-dist_xy / temp_stage_xy)
-        w_align_xy = torch.clamp(w_align_xy, 0.0, 1.0)
-
-        # "ready to descend" weight: need both clearance and near-xy
-        w_ready = w_clear * w_align_xy
-
-        # -----------------------------
-        # Dense objectives
-        # -----------------------------
-        # 1) XY approach (dominant): larger temp so it's not saturated at 0 when far
-        temp_xy = 0.20
-        r_xy = torch.exp(-dist_xy / temp_xy)
-        r_xy = torch.clamp(r_xy, 0.0, 1.0)
-
-        # 2) Clearance (lift) objective: only care until cleared; after that, don't keep rewarding "go higher"
-        temp_clear = 0.04
-        clear_def = torch.relu(-clearance)  # how much below clearance
-        r_clear = torch.exp(-clear_def / temp_clear)
-        r_clear = torch.clamp(r_clear, 0.0, 1.0)
-
-        # 3) Z-hold during transfer: only matters when cleared (avoid constant large reward before lift)
-        z_target = rim_z  # rim+10cm target height
-        z_err = torch.abs(obj_pos[:, 2] - z_target)
-        temp_z_hold = 0.06
-        r_z_hold = torch.exp(-z_err / temp_z_hold)
-        r_z_hold = torch.clamp(r_z_hold, 0.0, 1.0)
-
-        # 4) Descend/place: reward being low *only when aligned and cleared* (prevents dropping elsewhere)
-        temp_desc = 0.05
-        z_above_goal = torch.relu(obj_pos[:, 2] - 0.1)
-        r_low = torch.exp(-z_above_goal / temp_desc)  # 1 when low enough
-        r_low = torch.clamp(r_low, 0.0, 1.0)
-
-        # 5) Inside-site shaping: provide dense reward for getting within radius (helps when success is sparse)
-        # Use normalized distance to radius; clamp to avoid huge grads
-        norm_d = dist_xy / max(radius, 1e-3)
-        norm_d = torch.clamp(norm_d, 0.0, 5.0)
-        temp_inside = 0.5
-        r_inside = torch.exp(-norm_d / temp_inside)
-        r_inside = torch.clamp(r_inside, 0.0, 1.0)
-
-        # -----------------------------
-        # Constraints / regularizers (small, bounded)
-        # -----------------------------
-        # Grasp stability: keep object close to hand (non-slipping)
-        rel = torch.nan_to_num(self.target_to_hand_pos, nan=0.0, posinf=0.0, neginf=0.0)
-        rel_dist = torch.sqrt(torch.clamp((rel * rel).sum(dim=-1), min=0.0) + eps)
-        temp_grasp = 0.06
-        r_grasp = torch.exp(-rel_dist / temp_grasp)
-        r_grasp = torch.clamp(r_grasp, 0.0, 1.0)
-
-        # Orientation fixed: robust proxy from hint (qx and qw near 0 when pointing down)
-        hand_quat = torch.nan_to_num(self.hand_quat, nan=0.0, posinf=0.0, neginf=0.0)
-        ori_proxy = torch.sqrt(torch.clamp(hand_quat[:, 0] ** 2 + hand_quat[:, 3] ** 2, min=0.0) + eps)
-        temp_ori = 0.10
-        r_ori = torch.exp(-ori_proxy / temp_ori)
-        r_ori = torch.clamp(r_ori, 0.0, 1.0)
-
-        # Smoothness: discourage large joint velocities
-        jvel = torch.nan_to_num(self._robot.data.joint_vel, nan=0.0, posinf=0.0, neginf=0.0)
-        vmag = torch.sqrt(torch.clamp((jvel * jvel).sum(dim=-1), min=0.0) + eps)
-        temp_vel = 6.0
-        r_smooth = torch.exp(-vmag / temp_vel)
-        r_smooth = torch.clamp(r_smooth, 0.0, 1.0)
-
-        # Joint-limit margin: mild penalty only near limits
-        qpos = torch.nan_to_num(self._robot.data.joint_pos, nan=0.0, posinf=0.0, neginf=0.0)
-        lower = torch.nan_to_num(self.robot_dof_lower_limits, nan=0.0, posinf=0.0, neginf=0.0)
-        upper = torch.nan_to_num(self.robot_dof_upper_limits, nan=0.0, posinf=0.0, neginf=0.0)
-        span = torch.clamp(upper - lower, min=eps)
-        margin = torch.minimum(qpos - lower, upper - qpos) / span
-        margin_min = torch.clamp(margin.min(dim=-1).values, 0.0, 1.0)
-        jl_thresh = 0.06
-        jl_violation = torch.clamp((jl_thresh - margin_min) / jl_thresh, min=0.0, max=1.0)
-        r_joint = 1.0 - jl_violation
-        r_joint = torch.clamp(r_joint, 0.0, 1.0)
-
-        # -----------------------------
-        # Compose reward (all components ~O(1))
-        # -----------------------------
-        # Early: prioritize XY approach + clearance.
-        # After clearance: prioritize XY + z_hold.
-        # When ready (aligned+cleared): prioritize low + inside.
-        r_lift_phase = (1.0 - w_clear) * (0.9 * r_clear + 0.4 * r_xy)
-        r_transfer_phase = w_clear * (0.9 * r_xy + 0.5 * r_z_hold + 0.3 * r_inside)
-        r_place_phase = w_ready * (1.2 * r_low + 1.0 * r_inside + 0.3 * r_xy)
-
-        r_constraints = 0.25 * r_grasp + 0.20 * r_ori + 0.10 * r_smooth + 0.10 * r_joint
-
-        success_bonus = success.float()
-
-        reward = r_lift_phase + r_transfer_phase + r_place_phase + r_constraints + 8.0 * success_bonus
-
-        # -----------------------------
-        # Safety
-        # -----------------------------
-        reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
-        reward = torch.clamp(reward, -2.0, 12.0)
-        assert torch.isfinite(reward).all()
-
-        individual_rewards = {
-            "r_lift_phase": r_lift_phase,
-            "r_transfer_phase": r_transfer_phase,
-            "r_place_phase": r_place_phase,
-            "r_xy": r_xy,
-            "r_inside": r_inside,
-            "r_clear": r_clear,
-            "r_z_hold": r_z_hold,
-            "r_low": r_low,
-            "r_grasp": r_grasp,
-            "r_ori": r_ori,
-            "r_smooth": r_smooth,
-            "r_joint": r_joint,
-            "w_clear": w_clear,
-            "w_align_xy": w_align_xy,
-            "w_ready": w_ready,
-            "success_bonus": success_bonus,
-            "inside_site": inside_site.float(),
-            "low_enough": low_enough.float(),
-            "dist_xy": dist_xy,
-            "clearance": clearance,
-        }
-        return reward
-
 
     def get_target_object_to_hand_pose(self, init_states: dict):
         # Firstly find out the relative transformation, and then adjust the object pose according to robot pose.
@@ -1238,182 +1064,356 @@ class TestPutItInTheBasket(DirectRLEnv):
         grasped_right = self.scene["right_contact_sensor"].data.current_contact_time > 0
         grasped = grasped_left & grasped_right
         return grasped
-    
+   
+
 
     def _get_rewards_test(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         import torch
 
-        eps = 1e-6
         device = self.device
+        eps: float = 1e-6
 
-        # -----------------------------
-        # Read / sanitize state
-        # -----------------------------
-        obj_pos = torch.nan_to_num(self.target_object.data.root_pos_w, nan=0.0, posinf=0.0, neginf=0.0)  # (N,3)
-        site_pos = torch.nan_to_num(self.target_site.data.root_pos_w, nan=0.0, posinf=0.0, neginf=0.0)  # (N,3)
-        hand_pos = torch.nan_to_num(self.robot_grasp_pos, nan=0.0, posinf=0.0, neginf=0.0)  # (N,3)
+        def _safe(x: torch.Tensor) -> torch.Tensor:
+            return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
-        obj_xy = obj_pos[:, :2]
-        site_xy = site_pos[:, :2]
-        xy_vec = obj_xy - site_xy
-        dist2_xy = torch.clamp((xy_vec * xy_vec).sum(dim=-1), min=0.0)
-        dist_xy = torch.sqrt(dist2_xy + eps)
+        # ------------------------------------------------------------
+        # Fetch & sanitize (all tensors on self.device)
+        # ------------------------------------------------------------
+        obj_pos = _safe(self.target_object.data.root_pos_w)  # (N,3)
+        obj_vel = _safe(self.target_object.data.root_lin_vel_w)  # (N,3)
+        site_pos = _safe(self.target_site.data.root_pos_w)  # (N,3)
+        site_vel = _safe(self.target_site.data.root_lin_vel_w)  # (N,3)
 
-        # Basket height model:
-        # site z is bottom center; task wants clearance above rim by 10cm. We approximate rim at bottom + 0.10
-        rim_z = site_pos[:, 2] + 0.10
-        clearance = obj_pos[:, 2] - rim_z  # >0 means safely above rim+10cm
+        robot_q = _safe(self._robot.data.joint_pos)  # (N,dof)
+        robot_qd = _safe(self._robot.data.joint_vel)  # (N,dof)
 
-        # Provided success metric
-        radius = float(self.target_site_radius)
-        inside_site = dist2_xy < (radius * radius)
-        low_enough = obj_pos[:, 2] < 0.1
-        success = inside_site & low_enough
+        target_to_hand = _safe(self.target_to_hand_pos)  # (N,3)
+        site_to_target = _safe(self.site_to_target_pos)  # (N,3)
+        hand_quat = _safe(self.hand_quat)  # (N,4)
 
-        # -----------------------------
-        # Key issue in previous reward (from logs):
-        # - Huge/near-constant exp rewards (r_lift_height, r_descend, r_grasp, r_joint_margin) -> reward hacking.
-        # - XY shaping effectively off (r_xy_close ~0) because dist_xy huge and temp too small; also inside_site ~0.
-        # - Orientation term collapsed to 0 because "init quat = zeros" invalid -> always bad.
-        # New design:
-        #   1) Use bounded, scale-stable shaping in [0,1] (mostly exp(-err/temp)).
-        #   2) Make XY approach the primary dense objective early (bigger temp).
-        #   3) Use soft stage weights but avoid multiplying by hard indicators that freeze gradients.
-        #   4) Orientation: encourage "no rotation" by staying close to a *fixed reference* computed from current
-        #      at reset is not available; use a robust "keep pointing down" proxy from hint: penalize (qx,qw).
-        #   5) Add a strong "inside & low" sparse bonus, but keep dense terms informative.
-        # -----------------------------
+        grasped = _safe(self._grasp_detection().float())
+        if grasped.ndim == 2 and grasped.shape[-1] == 1:
+            grasped = grasped.squeeze(-1)
+        grasped = torch.clamp(grasped, 0.0, 1.0)
 
-        # -----------------------------
-        # Soft stage weights (no hard gates)
-        # -----------------------------
-        # w_clear ~ 0 when below clearance, -> 1 when above
-        temp_stage_clear = 0.02
-        w_clear = torch.sigmoid(torch.clamp(clearance / temp_stage_clear, -20.0, 20.0))
+        manipulability = torch.clamp(_safe(self.manipulability), 0.0, 1e3)
 
-        # w_align_xy ~ 0 far, -> 1 near basket opening
-        # Choose a scale around basket radius / few cm; use 4cm for smoothness.
-        temp_stage_xy = 0.04
-        w_align_xy = torch.exp(-dist_xy / temp_stage_xy)
-        w_align_xy = torch.clamp(w_align_xy, 0.0, 1.0)
+        # TCP vel (slip proxy)
+        left_v = _safe(self._robot.data.body_link_lin_vel_w[:, self.left_finger_body_idx])
+        right_v = _safe(self._robot.data.body_link_lin_vel_w[:, self.right_finger_body_idx])
+        tcp_vel = 0.5 * (left_v + right_v)
+        rel_vel = torch.linalg.norm(obj_vel - tcp_vel, dim=-1)
 
-        # "ready to descend" weight: need both clearance and near-xy
-        w_ready = w_clear * w_align_xy
+        # Optional action regularization (if available)
+        act = getattr(self, "actions", None)
+        if act is None:
+            act_pen = torch.zeros((self.num_envs,), device=device)
+        else:
+            act = _safe(act)
+            act_pen = torch.sum(torch.clamp(act, -1.0, 1.0) ** 2, dim=-1)
 
-        # -----------------------------
-        # Dense objectives
-        # -----------------------------
-        # 1) XY approach (dominant): larger temp so it's not saturated at 0 when far
-        temp_xy = 0.20
-        r_xy = torch.exp(-dist_xy / temp_xy)
-        r_xy = torch.clamp(r_xy, 0.0, 1.0)
+        # ------------------------------------------------------------
+        # Geometry / success metric
+        # ------------------------------------------------------------
+        rad: float = float(self.target_site_radius)
+        d_xy = torch.linalg.norm(site_to_target[:, :2], dim=-1)
+        obj_z = obj_pos[:, 2]
+        site_z = site_pos[:, 2]
+        h = obj_z - site_z  # height above basket bottom plane
 
-        # 2) Clearance (lift) objective: only care until cleared; after that, don't keep rewarding "go higher"
-        temp_clear = 0.04
-        clear_def = torch.relu(-clearance)  # how much below clearance
-        r_clear = torch.exp(-clear_def / temp_clear)
-        r_clear = torch.clamp(r_clear, 0.0, 1.0)
+        inside_site = (d_xy * d_xy) < (rad * rad)
+        low_enough = obj_z < 0.1
+        success = (inside_site & low_enough).float()
 
-        # 3) Z-hold during transfer: only matters when cleared (avoid constant large reward before lift)
-        z_target = rim_z  # rim+10cm target height
-        z_err = torch.abs(obj_pos[:, 2] - z_target)
-        temp_z_hold = 0.06
-        r_z_hold = torch.exp(-z_err / temp_z_hold)
-        r_z_hold = torch.clamp(r_z_hold, 0.0, 1.0)
+        hand_obj_dist = torch.linalg.norm(target_to_hand, dim=-1)
 
-        # 4) Descend/place: reward being low *only when aligned and cleared* (prevents dropping elsewhere)
-        temp_desc = 0.05
-        z_above_goal = torch.relu(obj_pos[:, 2] - 0.1)
-        r_low = torch.exp(-z_above_goal / temp_desc)  # 1 when low enough
-        r_low = torch.clamp(r_low, 0.0, 1.0)
+        # ------------------------------------------------------------
+        # helper_variable progress / memory (robust stage machine)
+        # hv[0]=stage (0..5)
+        # hv[1]=stable_cnt
+        # hv[2]=prev_dxy
+        # hv[3]=prev_h
+        # hv[4]=prev_grasp
+        # hv[5]=armed_cnt
+        # hv[6]=tsr (time since proper release)
+        # hv[7]=had_proper_release
+        # hv[8]=success_latch
+        # hv[9]=unused
+        # ------------------------------------------------------------
+        hv = self.helper_variable
+        if hv is None or hv.shape[0] != self.num_envs or hv.shape[1] < 10:
+            hv = torch.zeros((self.num_envs, 10), device=device)
 
-        # 5) Inside-site shaping: provide dense reward for getting within radius (helps when success is sparse)
-        # Use normalized distance to radius; clamp to avoid huge grads
-        norm_d = dist_xy / max(radius, 1e-3)
-        norm_d = torch.clamp(norm_d, 0.0, 5.0)
-        temp_inside = 0.5
-        r_inside = torch.exp(-norm_d / temp_inside)
-        r_inside = torch.clamp(r_inside, 0.0, 1.0)
+        stage = _safe(hv[:, 0])
+        stable_cnt = _safe(hv[:, 1])
+        prev_dxy = _safe(hv[:, 2])
+        prev_h = _safe(hv[:, 3])
+        prev_grasp = torch.clamp(_safe(hv[:, 4]), 0.0, 1.0)
+        armed_cnt = _safe(hv[:, 5])
+        tsr = _safe(hv[:, 6])
+        had_release = torch.clamp(_safe(hv[:, 7]), 0.0, 1.0)
+        success_latch = torch.clamp(_safe(hv[:, 8]), 0.0, 1.0)
 
-        # -----------------------------
-        # Constraints / regularizers (small, bounded)
-        # -----------------------------
-        # Grasp stability: keep object close to hand (non-slipping)
-        rel = torch.nan_to_num(self.target_to_hand_pos, nan=0.0, posinf=0.0, neginf=0.0)
-        rel_dist = torch.sqrt(torch.clamp((rel * rel).sum(dim=-1), min=0.0) + eps)
-        temp_grasp = 0.06
-        r_grasp = torch.exp(-rel_dist / temp_grasp)
-        r_grasp = torch.clamp(r_grasp, 0.0, 1.0)
+        prev_dxy = torch.where(prev_dxy > 0.0, prev_dxy, d_xy.detach())
+        prev_h = torch.where(prev_h != 0.0, prev_h, h.detach())
 
-        # Orientation fixed: robust proxy from hint (qx and qw near 0 when pointing down)
-        hand_quat = torch.nan_to_num(self.hand_quat, nan=0.0, posinf=0.0, neginf=0.0)
-        ori_proxy = torch.sqrt(torch.clamp(hand_quat[:, 0] ** 2 + hand_quat[:, 3] ** 2, min=0.0) + eps)
-        temp_ori = 0.10
-        r_ori = torch.exp(-ori_proxy / temp_ori)
-        r_ori = torch.clamp(r_ori, 0.0, 1.0)
+        # Stable grasp proxy (slightly easier than previous; avoid blocking exploration)
+        stable_grasp = (grasped > 0.5) & (rel_vel < 0.60) & (hand_obj_dist < 0.17)
+        stable_cnt = torch.clamp(stable_cnt + stable_grasp.float(), 0.0, 300.0)
+        stable_enough = stable_cnt >= 3.0
 
-        # Smoothness: discourage large joint velocities
-        jvel = torch.nan_to_num(self._robot.data.joint_vel, nan=0.0, posinf=0.0, neginf=0.0)
-        vmag = torch.sqrt(torch.clamp((jvel * jvel).sum(dim=-1), min=0.0) + eps)
-        temp_vel = 6.0
-        r_smooth = torch.exp(-vmag / temp_vel)
-        r_smooth = torch.clamp(r_smooth, 0.0, 1.0)
+        # Stages / thresholds (make "place above basket" crisper to improve conversion to success)
+        lift_h: float = 0.16
+        place_h: float = 0.15  # height to be "above opening" before release
 
-        # Joint-limit margin: mild penalty only near limits
-        qpos = torch.nan_to_num(self._robot.data.joint_pos, nan=0.0, posinf=0.0, neginf=0.0)
-        lower = torch.nan_to_num(self.robot_dof_lower_limits, nan=0.0, posinf=0.0, neginf=0.0)
-        upper = torch.nan_to_num(self.robot_dof_upper_limits, nan=0.0, posinf=0.0, neginf=0.0)
-        span = torch.clamp(upper - lower, min=eps)
-        margin = torch.minimum(qpos - lower, upper - qpos) / span
-        margin_min = torch.clamp(margin.min(dim=-1).values, 0.0, 1.0)
-        jl_thresh = 0.06
-        jl_violation = torch.clamp((jl_thresh - margin_min) / jl_thresh, min=0.0, max=1.0)
-        r_joint = 1.0 - jl_violation
-        r_joint = torch.clamp(r_joint, 0.0, 1.0)
+        lifted_now = (h > lift_h) & (grasped > 0.5) & stable_enough
+        align_xy: float = max(0.028, 0.65 * rad)  # tighter than before to increase inside_site probability
+        aligned_now = (d_xy < align_xy) & (h > place_h) & (grasped > 0.5) & stable_enough
 
-        # -----------------------------
-        # Compose reward (all components ~O(1))
-        # -----------------------------
-        # Early: prioritize XY approach + clearance.
-        # After clearance: prioritize XY + z_hold.
-        # When ready (aligned+cleared): prioritize low + inside.
-        r_lift_phase = (1.0 - w_clear) * (0.9 * r_clear + 0.4 * r_xy)
-        r_transfer_phase = w_clear * (0.9 * r_xy + 0.5 * r_z_hold + 0.3 * r_inside)
-        r_place_phase = w_ready * (1.2 * r_low + 1.0 * r_inside + 0.3 * r_xy)
+        # Require being above opening AND near center for a couple steps before "armed"
+        in_band_lo: float = 0.14
+        in_band_hi: float = 0.24
+        in_release_band = (h > in_band_lo) & (h < in_band_hi)
+        arm_ready = aligned_now & in_release_band
+        armed_cnt = torch.clamp(armed_cnt + arm_ready.float(), 0.0, 20.0)
+        armed_enough = armed_cnt >= 3.0
 
-        r_constraints = 0.25 * r_grasp + 0.20 * r_ori + 0.10 * r_smooth + 0.10 * r_joint
+        # Release event and proper release detection
+        release_event = ((prev_grasp > 0.5) & (grasped < 0.5)).float()
+        proper_release = (release_event > 0.5) & armed_enough & (d_xy < max(0.05, 0.95 * rad)) & in_release_band
 
-        success_bonus = success.float()
+        had_release = torch.maximum(had_release, proper_release.float())
 
-        reward = r_lift_phase + r_transfer_phase + r_place_phase + r_constraints + 8.0 * success_bonus
+        # Time since proper release (for limited post-shaping)
+        tsr = torch.where(proper_release, torch.zeros_like(tsr), tsr + 1.0)
+        tsr = torch.where(had_release > 0.5, tsr, torch.zeros_like(tsr))
+        tsr = torch.clamp(tsr, 0.0, 80.0)
 
-        # -----------------------------
-        # Safety
-        # -----------------------------
+        # Success latch to give a terminal-ish bonus without relying on env termination
+        success_latch = torch.maximum(success_latch, success)
+
+        # Monotonic stage
+        stage = torch.maximum(stage, stable_enough.float() * 1.0)
+        stage = torch.maximum(stage, lifted_now.float() * 2.0)
+        stage = torch.maximum(stage, aligned_now.float() * 3.0)
+        stage = torch.maximum(stage, had_release * 4.0)
+        stage = torch.maximum(stage, success_latch * 5.0)
+
+        # Reset arming if grasp lost before proper release; reset after success
+        armed_cnt = torch.where((grasped < 0.5) & (had_release < 0.5), torch.zeros_like(armed_cnt), armed_cnt)
+        armed_cnt = torch.where(success_latch > 0.5, torch.zeros_like(armed_cnt), armed_cnt)
+
+        # Write back memory
+        hv[:, 0] = stage.detach()
+        hv[:, 1] = stable_cnt.detach()
+        hv[:, 2] = d_xy.detach()
+        hv[:, 3] = h.detach()
+        hv[:, 4] = grasped.detach()
+        hv[:, 5] = armed_cnt.detach()
+        hv[:, 6] = tsr.detach()
+        hv[:, 7] = had_release.detach()
+        hv[:, 8] = success_latch.detach()
+        self.helper_variable = hv
+
+        g_stable = (stage >= 1.0).float()
+        g_lifted = (stage >= 2.0).float()
+        g_aligned = (stage >= 3.0).float()
+        g_released = (stage >= 4.0).float()
+
+        # ------------------------------------------------------------
+        # Reward terms (changes from best-so-far)
+        # 1) Reduce "release_event" dominance by: smaller weight + shaped "armed staying" reward.
+        # 2) Increase conversion to actual success by: stronger centering while aligned, and post-release inside_xy.
+        # 3) Replace/soften progress deltas with bounded potential differences (less noisy).
+        # 4) Add explicit action penalty.
+        # ------------------------------------------------------------
+
+        # HOLD: stable grasp + low slip
+        temp_slip: float = 0.30
+        r_low_slip = torch.exp(-torch.clamp(rel_vel, 0.0, 8.0) / temp_slip)
+        temp_hand: float = 0.14
+        r_hand_close = torch.exp(-torch.clamp(hand_obj_dist, 0.0, 0.9) / temp_hand)
+        r_hold = (0.65 * r_low_slip + 0.35 * r_hand_close) * (grasped > 0.5).float()
+
+        # LIFT: be above lift_h
+        temp_lift: float = 0.07
+        lift_err = torch.clamp(torch.relu(lift_h - h), 0.0, 2.0)
+        r_lift = torch.exp(-lift_err / temp_lift) * (grasped > 0.5).float() * g_stable
+
+        # MOVE XY while lifted
+        temp_xy: float = 0.10
+        r_xy = torch.exp(-torch.clamp(d_xy, 0.0, 3.0) / temp_xy) * (grasped > 0.5).float() * g_lifted
+
+        # Potential-based progress (less spiky than raw delta; also works near goal)
+        temp_phi: float = 0.16
+        phi = torch.exp(-torch.clamp(d_xy, 0.0, 3.0) / temp_phi)
+        phi_prev = torch.exp(-torch.clamp(prev_dxy, 0.0, 3.0) / temp_phi)
+        r_phi_prog = torch.clamp(phi - phi_prev, -0.10, 0.10) * (grasped > 0.5).float() * g_lifted
+
+        # PRE-PLACE: tight center + height band, only when grasped
+        temp_band: float = 0.06
+        band_err = torch.clamp(torch.relu(in_band_lo - h) + torch.relu(h - in_band_hi), 0.0, 3.0)
+        r_band = torch.exp(-band_err / temp_band)
+
+        # Stronger centering when approaching place stage (helps actual inside_site)
+        temp_center: float = max(0.020, 0.45 * rad)
+        r_center = torch.exp(-torch.clamp(d_xy, 0.0, 3.0) / temp_center)
+        r_pre = r_center * r_band * (grasped > 0.5).float() * g_lifted
+
+        # "Stay armed" reward: encourages hovering aligned+inband before release (replaces over-reliance on release bonus)
+        r_armed_stay = arm_ready.float() * (grasped > 0.5).float() * g_lifted
+
+        # RELEASE: reward only for proper release; penalize premature releases
+        temp_rel_xy: float = 0.06
+        r_rel_xy = torch.exp(-torch.clamp(d_xy, 0.0, 3.0) / temp_rel_xy)
+        r_release_good = release_event * proper_release.float() * r_rel_xy * r_band
+        r_release_bad = -release_event * (1.0 - proper_release.float())  # includes unarmed + wrong position
+
+        # POST-RELEASE window
+        post_window = torch.exp(-torch.clamp(tsr, 0.0, 80.0) / 14.0)  # in (0,1]
+        post_mask = (1.0 - grasped) * g_released * post_window
+
+        # Keep object inside in XY during fall (important for conversion)
+        temp_inside: float = max(0.020, 0.55 * rad)
+        r_inside_xy = torch.exp(-torch.clamp(d_xy, 0.0, 3.0) / temp_inside) * post_mask
+
+        # Encourage it to go down after release (bounded)
+        dh = torch.clamp(prev_h - h, -0.12, 0.12)
+        r_down = torch.relu(dh) * post_mask
+
+        # Low + settle only if inside_site (avoid rewarding dropping outside)
+        temp_low: float = 0.055
+        z_err = torch.clamp(torch.relu(obj_z - 0.1), 0.0, 2.0)
+        r_low = torch.exp(-z_err / temp_low)
+        temp_settle: float = 1.05
+        settle_speed = torch.linalg.norm(obj_vel - site_vel, dim=-1)
+        r_settle = torch.exp(-torch.clamp(settle_speed, 0.0, 12.0) / temp_settle)
+
+        r_drop = post_mask * inside_site.float() * r_low * r_settle
+
+        # Success bonus (latching gives at least one-step big reward)
+        r_success = success_latch
+
+        # ------------------------------------------------------------
+        # Regularization / safety (smooth motion, avoid singularities)
+        # ------------------------------------------------------------
+        qd_l2 = torch.sum(torch.clamp(robot_qd, -60.0, 60.0) ** 2, dim=-1)
+
+        q_min = self.robot_dof_lower_limits
+        q_max = self.robot_dof_upper_limits
+        q_center = 0.5 * (q_min + q_max)
+        q_half = torch.clamp(0.5 * (q_max - q_min), min=eps)
+        q_norm = _safe(torch.abs((robot_q - q_center) / q_half))
+        jl_margin: float = 0.88
+        jl_pen = torch.sum(torch.relu(q_norm - jl_margin) ** 2, dim=-1)
+
+        # manipulability reward (bounded [0,1))
+        temp_manip: float = 0.55
+        r_manip = 1.0 - torch.exp(-torch.clamp(manipulability, 0.0, 12.0) / temp_manip)
+
+        # mild orientation prior: keep near "pointing down" (qx,qw near 0)
+        qx = hand_quat[:, 0]
+        qw = hand_quat[:, 3]
+        temp_ori: float = 0.40
+        ori_err = torch.clamp(torch.abs(qx) + torch.abs(qw), 0.0, 2.0)
+        r_ori = torch.exp(-ori_err / temp_ori)
+
+        # keep speeds controlled
+        obj_speed = torch.linalg.norm(obj_vel, dim=-1)
+        tcp_speed = torch.linalg.norm(tcp_vel, dim=-1)
+        temp_speed: float = 1.35
+        r_speed = torch.exp(-torch.clamp(obj_speed + tcp_speed, 0.0, 25.0) / temp_speed)
+
+        # ------------------------------------------------------------
+        # Weights (rebalance: reduce release-event farming; increase centering & post-release inside_xy)
+        # ------------------------------------------------------------
+        w_hold = 0.18
+        w_lift = 0.30
+        w_xy = 0.18
+        w_phi_prog = 7.0
+        w_pre = 0.95
+        w_armed_stay = 0.45
+
+        w_release_good = 5.0
+        w_release_bad = 4.0
+
+        w_inside_xy = 4.5
+        w_down = 7.0
+        w_drop = 5.0
+
+        w_success = 95.0
+
+        w_manip = 0.06
+        w_ori = 0.02
+        w_speed = 0.10
+
+        w_qd = 0.0017
+        w_jl = 0.06
+        w_act = 0.02
+
+        rew_hold = w_hold * r_hold
+        rew_lift = w_lift * r_lift
+        rew_xy = w_xy * r_xy
+        rew_phi_prog = w_phi_prog * r_phi_prog
+        rew_pre = w_pre * r_pre
+        rew_armed_stay = w_armed_stay * r_armed_stay
+
+        rew_release = w_release_good * r_release_good + w_release_bad * r_release_bad
+
+        rew_inside_xy = w_inside_xy * r_inside_xy
+        rew_down = w_down * r_down
+        rew_drop = w_drop * r_drop
+
+        rew_success = w_success * r_success
+
+        rew_manip = w_manip * r_manip
+        rew_ori = w_ori * r_ori
+        rew_speed = w_speed * r_speed
+
+        rew_qd = -w_qd * qd_l2
+        rew_jl = -w_jl * jl_pen
+        rew_act = -w_act * act_pen
+
+        reward = (
+            rew_hold
+            + rew_lift
+            + rew_xy
+            + rew_phi_prog
+            + rew_pre
+            + rew_armed_stay
+            + rew_release
+            + rew_inside_xy
+            + rew_down
+            + rew_drop
+            + rew_success
+            + rew_manip
+            + rew_ori
+            + rew_speed
+            + rew_qd
+            + rew_jl
+            + rew_act
+        )
+
         reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
-        reward = torch.clamp(reward, -2.0, 12.0)
-        assert torch.isfinite(reward).all()
+        assert torch.isfinite(reward).all(), "Non-finite reward detected."
 
         individual_rewards = {
-            "r_lift_phase": r_lift_phase,
-            "r_transfer_phase": r_transfer_phase,
-            "r_place_phase": r_place_phase,
-            "r_xy": r_xy,
-            "r_inside": r_inside,
-            "r_clear": r_clear,
-            "r_z_hold": r_z_hold,
-            "r_low": r_low,
-            "r_grasp": r_grasp,
-            "r_ori": r_ori,
-            "r_smooth": r_smooth,
-            "r_joint": r_joint,
-            "w_clear": w_clear,
-            "w_align_xy": w_align_xy,
-            "w_ready": w_ready,
-            "success_bonus": success_bonus,
-            "inside_site": inside_site.float(),
-            "low_enough": low_enough.float(),
-            "dist_xy": dist_xy,
-            "clearance": clearance,
+            "hold": rew_hold,
+            "lift": rew_lift,
+            "move_xy": rew_xy,
+            "phi_xy_progress": rew_phi_prog,
+            "pre_place": rew_pre,
+            "armed_stay": rew_armed_stay,
+            "release_event": rew_release,
+            "inside_xy_post": rew_inside_xy,
+            "down_progress": rew_down,
+            "drop_in": rew_drop,
+            "success": rew_success,
+            "manipulability": rew_manip,
+            "hand_ori": rew_ori,
+            "controlled_speed": rew_speed,
+            "joint_vel_reg": rew_qd,
+            "joint_limit_reg": rew_jl,
+            "action_reg": rew_act,
         }
         return reward, individual_rewards
