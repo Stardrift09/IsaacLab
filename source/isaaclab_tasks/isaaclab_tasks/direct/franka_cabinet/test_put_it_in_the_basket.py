@@ -239,9 +239,18 @@ class TestPutItInTheBasket(DirectRLEnv):
         
         # pdb.set_trace()
 
-        self.debug = False  
 
+        self.debug = False  
         super().__init__(cfg, render_mode, **kwargs)
+
+        # deal with the offset needed for each object
+        offset_dict = {
+            "alphabet_soup":torch.tensor([0, 0, 0.05], device=self.device),
+            "cream_cheese":torch.tensor([0, 0, 0.04], device=self.device),
+            "ketchup":torch.tensor([0, 0, 0.08], device=self.device),
+        }
+        offset = offset_dict[self.target_object_name]
+
         self.sample = self.episodes[0]["states"][0].copy()
         self.sample.pop("franka", None)
         
@@ -486,7 +495,7 @@ class TestPutItInTheBasket(DirectRLEnv):
         )
         # robot_local_pose_pos += torch.tensor([0, 0.0, 0.04], device=self.device) # already works well
         #TODO: check if this is object specific
-        robot_local_pose_pos += torch.tensor([0, 0, 0.05], device=self.device) # This one is tuned from libero demo
+        robot_local_pose_pos += offset # This one is tuned from libero demo
 
         self.robot_local_grasp_pos = robot_local_pose_pos.repeat((self.num_envs, 1)) # 3
         self.robot_local_grasp_rot = robot_local_grasp_pose_rot.repeat((self.num_envs, 1)) # 4
@@ -949,7 +958,7 @@ class TestPutItInTheBasket(DirectRLEnv):
                     if self.target_object.data.root_pos_w[0,2] > 0.09: # check if the grasp is stable (object-hand distance is small) and the object is lifted up (z is large), which should happen at the end of episode when the agent learns to lift up the object while keeping a stable grasp
                         print(f"timestep {t}: object in the air")
                     print(diff_norm[0]) # should be small and constant if the grasp is stable, which is the case for most of the episode, except at the end when the object is lifted up and the grasp is broken. This matches with the observation that the agent learns to keep a stable grasp and lift up the object at the end of training.
-                    print(self.target_object.data.root_pos_w[0,2]) # also check the object position, should be lifted up at the end of episode
+                    # print(self.target_object.data.root_pos_w[0,2]) # also check the object position, should be lifted up at the end of episode
                     # _ = self._get_observations() # this will update the corners_target_obj_to_hand_pos, which is the relative position from object corners to hand in world coordinate, should be small if the grasp is stable. This is a more direct way to check the grasp stability, and also provides more information about the relative position between the hand and the object, which can be useful for reward design.
                     # print(self.corners_target_obj_to_hand_pos[0])
 
@@ -972,10 +981,7 @@ class TestPutItInTheBasket(DirectRLEnv):
                             eureka_episode_sums[key] = torch.zeros(num_episodes, device=self.device)
                         eureka_episode_sums[key] += rewards_dict_replay[key]
                 else:
-                    raise NotImplementedError(
-                        f"{self.__class__.__name__} must implement `_get_rewards_eureka()` "
-                        "when using Eureka reward replay."
-                    )
+                    print("WARNING: No function is named _get_rewards_eureka")
 
                 # After all replay is done, devide by episode length, and record
             for k in eureka_episode_sums.keys():
