@@ -53,7 +53,7 @@ class TestPutItInTheBasketCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1024, env_spacing=3.0, replicate_physics=True, clone_in_fabric=False, 
+        num_envs=2048, env_spacing=3.0, replicate_physics=True, clone_in_fabric=False, 
     )
 
 
@@ -217,12 +217,15 @@ class TestPutItInTheBasket(DirectRLEnv):
         self.target_object_name = "ketchup"
         self.target_site_name = "basket"
         self.input_direction = 2 # z axis
+        if self.input_direction is not 2:
+            raise NotImplementedError("Change the _get_dones method and other calculations for deciding the entry size")
         self.path = f"{self.root}/libero/trajs/libero90/libero_90_living_room_scene1_pick_up_the_{self.target_object_name}_and_put_it_in_the_basket_traj_v2.pkl"
 
         start_idx_in_episode_dict = {
             "alphabet_soup":80,
-            "cream_cheese":70,
-            "ketchup":100,
+            "cream_cheese":80,
+            "ketchup":80,
+            "tomato_sauce":90,
         }
         self.start_idx_in_episode = start_idx_in_episode_dict[self.target_object_name] # for cream_cheese
         # self.start_idx_in_episode = 80 # For living room scene 1 pick up the alphabet soup
@@ -246,6 +249,7 @@ class TestPutItInTheBasket(DirectRLEnv):
         # deal with the offset needed for each object
         offset_dict = {
             "alphabet_soup":torch.tensor([0, 0, 0.05], device=self.device),
+            "tomato_sauce":torch.tensor([0, 0, 0.05], device=self.device),
             "cream_cheese":torch.tensor([0, 0, 0.04], device=self.device),
             "ketchup":torch.tensor([0, 0, 0.08], device=self.device),
         }
@@ -467,7 +471,6 @@ class TestPutItInTheBasket(DirectRLEnv):
         self.target_site_radius = site_half - obj_half
         if self.target_site_radius.item() < 0:
             self.target_site_radius = torch.tensor(0.02)
-        self.input_direction = torch.tensor([0, 0, 1], device=self.device) # z axis
 
         hand_pose = get_env_local_pose(
             self.scene.env_origins[0],
@@ -651,7 +654,8 @@ class TestPutItInTheBasket(DirectRLEnv):
         self._compute_intermediate_values()
 
         # condition for termination
-        low_enough = self.target_object.data.root_pos_w[:, 2] <0.1
+        site_height = self.target_site_corners_world[1,2] - self.target_site_corners_world[0,2]
+        low_enough = self.target_object.data.root_pos_w[:, 2] <site_height # change the harded coded height
         obj_xy = self.target_object.data.root_pos_w[:, :2]
         site_pos = self.target_site.data.root_pos_w[:, :2]
         dist2 = ((obj_xy - site_pos)**2).sum(dim=-1)
@@ -718,7 +722,7 @@ class TestPutItInTheBasket(DirectRLEnv):
         self.site_to_target_pos = self.target_site.data.root_pos_w - self.target_object.data.root_pos_w
         site_to_target_vel = self.target_object.data.root_lin_vel_w - self.target_site.data.root_lin_vel_w
         # self.target_site_corners_world # you can read the three dim from the [2, 3] tensor storing min(first row) and max corner of the site in local env frame
-        # you can check the direction where you enter with self.input_direction
+
         grasped = self._grasp_detection().float() # [num_envs, 1] 1 means two fingers have contact force against object, thereby grasping
 
         self.manipulability = self._compute_manipulability(self._robot._ALL_INDICES) # [num_envs] Always have reward on this to have correct robot motion
@@ -955,10 +959,11 @@ class TestPutItInTheBasket(DirectRLEnv):
                     diff = self.target_object.data.body_pos_w.squeeze(1) - self.robot_grasp_pos
                     # print(diff[0]) # play the first episode to check the constant object-hand distance
                     diff_norm = torch.norm(diff, dim=-1)  # shape: (n,)
-                    if self.target_object.data.root_pos_w[0,2] > 0.09: # check if the grasp is stable (object-hand distance is small) and the object is lifted up (z is large), which should happen at the end of episode when the agent learns to lift up the object while keeping a stable grasp
+                    # 0.09 ketchup/ 0.03 cream_cheese 0.1 alphabet_soup
+                    if self.target_object.data.root_pos_w[0,2] > 0.1: # check if the grasp is stable (object-hand distance is small) and the object is lifted up (z is large), which should happen at the end of episode when the agent learns to lift up the object while keeping a stable grasp
                         print(f"timestep {t}: object in the air")
                     print(diff_norm[0]) # should be small and constant if the grasp is stable, which is the case for most of the episode, except at the end when the object is lifted up and the grasp is broken. This matches with the observation that the agent learns to keep a stable grasp and lift up the object at the end of training.
-                    # print(self.target_object.data.root_pos_w[0,2]) # also check the object position, should be lifted up at the end of episode
+                    print(self.target_object.data.root_pos_w[0,2]) # also check the object position, should be lifted up at the end of episode
                     # _ = self._get_observations() # this will update the corners_target_obj_to_hand_pos, which is the relative position from object corners to hand in world coordinate, should be small if the grasp is stable. This is a more direct way to check the grasp stability, and also provides more information about the relative position between the hand and the object, which can be useful for reward design.
                     # print(self.corners_target_obj_to_hand_pos[0])
 
