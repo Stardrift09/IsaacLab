@@ -524,7 +524,7 @@ class TestStageAsFeedback(DirectRLEnv):
         self.hand_quat = torch.zeros((self.num_envs, 4), device=self.device) 
         self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
         self.manipulability = torch.zeros((self.num_envs), device=self.device)
-        self.stage = torch.zeros((self.num_envs), device=self.device)
+        self.stage = torch.zeros((self.num_envs, 1), device=self.device)
     def _setup_scene(self):
         # init_states = self.data['franka'][0]["init_state"] # this is from the first scene as set up. Init states of traj should be updated in reset_idx
         # init_states = self.data['franka'][0]["states"][100]
@@ -660,6 +660,8 @@ class TestStageAsFeedback(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         # manual update for observation needed values
         self._compute_intermediate_values()
+        self.manipulability = self._compute_manipulability() # [num_envs] Always have reward on this to have correct robot motion
+        self.stage = self._current_stage_detection().unsqueeze(1) # [num_envs, 1] 0 for beginning, 1 for object being successfully grasped, 2 for object being lifted to desired height, 3 for object is right above the basket.
 
         # condition for termination
         site_height = self.target_site_corners_world[1,2] - self.target_site_corners_world[0,2]
@@ -705,15 +707,11 @@ class TestStageAsFeedback(DirectRLEnv):
             object.write_root_velocity_to_sim(object_default_state[:, 7:], env_ids)
 
         self._compute_intermediate_values(env_ids=env_ids)
-        
         self.helper_variable[env_ids] = torch.zeros((len(env_ids), 10), device=self.device)
-
+        self.stage[env_ids] = 0
 
     def _get_observations(self) -> dict:
-        # self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
-        # self.rigid_objects is a list with all RigidObjects
-        # Objects' root_pos_w is their center, and site's root_pos_w is the bottom center.
-
+        # Compute obs components
         dof_pos_scaled = (
             2.0
             * (self._robot.data.joint_pos - self.robot_dof_lower_limits)
@@ -725,13 +723,14 @@ class TestStageAsFeedback(DirectRLEnv):
         self.hand_quat = self._robot.data.body_quat_w[:, self.hand_link_idx]
         tcp_vel = (self._robot.data.body_link_lin_vel_w[:,self.left_finger_body_idx] + self._robot.data.body_link_lin_vel_w[:,self.right_finger_body_idx])/2
         target_to_hand_vel = self.target_object.data.root_lin_vel_w - tcp_vel
-        # add velocity
-
         self.site_to_target_pos = self.target_site.data.root_pos_w - self.target_object.data.root_pos_w
         site_to_target_vel = self.target_object.data.root_lin_vel_w - self.target_site.data.root_lin_vel_w
         
 
-        # Below are some helpful variables
+        # # Below are some further helpful attributes and hints
+        # self.rigid_objects is a list with all RigidObjects
+        # Objects' root_pos_w is their center, and site's root_pos_w is the bottom center.
+        # self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
         # self.target_site_corners_world # you can read the three dim from the [2, 3] tensor storing min(first row) and max corner of the site in local env frame
         # self.target_site_corners_world = torch.tensor(
         #     [
@@ -741,10 +740,12 @@ class TestStageAsFeedback(DirectRLEnv):
         #     dtype=torch.float32,
         #     device=self.device,
         # )  # [2, 3]
-        grasped = self._grasp_detection().float() # [num_envs, 1] 1 means two fingers have contact force against object, thereby grasping
-        self.stage = self._current_stage_detection().unsqueeze(1) # [[num_envs, 1]] 0 for beginning, 1 for success in grasping the object, 2 for object being lifted to desired height, 3 for object is right above the basket.
-        self.manipulability = self._compute_manipulability() # [num_envs] Always have reward on this to have correct robot motion
-        
+
+        # self.manipulability = self._compute_manipulability() # [num_envs] Always have reward on this to have correct robot motion
+        # self.stage = self._current_stage_detection().unsqueeze(1) # [num_envs, 1] 0 for beginning, 1 for object being successfully grasped, 2 for object being lifted to desired height, 3 for object is right above the basket.
+
+
+
         obs = torch.cat(
             (
                 dof_pos_scaled,
@@ -755,7 +756,7 @@ class TestStageAsFeedback(DirectRLEnv):
                 self.site_to_target_pos, # relative position in x y from target site to target object
                 target_to_hand_vel,
                 site_to_target_vel,
-                grasped, # 1 or 0, indicating whether is grasped or not.
+                self.stage
             ),
             dim=-1,
         )
@@ -1094,7 +1095,34 @@ class TestStageAsFeedback(DirectRLEnv):
         # Should handle the case for reset
         # Compare the analytical solution and that from autograd
 
-    
+
+    def _current_stage_detection(self, env_ids: torch.Tensor | None = None):
+        if env_ids is None:
+            env_ids = self._robot._ALL_INDICES
+        grasped = self._grasp_detection(env_ids=env_ids).squeeze(1)          # bool tensor
+        object_lowest_point = self._get_target_object_lowest_points(env_ids=env_ids)
+        site_height = self.target_site_corners_world[1,2] - self.target_site_corners_world[0,2]      # tensor (meters)
+        inside_site = self._get_inside_site(env_ids=env_ids)          # bool tensor
+
+        # Stage 1
+        stage = grasped.float()
+
+        # Stage 2: grasped AND height > 0.10 m
+        
+        stage = torch.where(
+            grasped & (object_lowest_point > site_height),
+            torch.full_like(stage, 2.0),
+            stage
+        )
+
+        # Stage 3: grasped AND inside_site
+        stage = torch.where(
+            grasped & inside_site,
+            torch.full_like(stage, 3.0),
+            stage
+        )
+        return stage # [self.num_envs]
+
 
     def _grasp_detection(self, env_ids: torch.Tensor | None = None):
         if env_ids is None:
@@ -1122,32 +1150,6 @@ class TestStageAsFeedback(DirectRLEnv):
         return inside_site
     
 
-    def _current_stage_detection(self, env_ids: torch.Tensor | None = None):
-        if env_ids is None:
-            env_ids = self._robot._ALL_INDICES
-        grasped = self._grasp_detection(env_ids=env_ids).squeeze(1)          # bool tensor
-        object_lowest_point = self._get_target_object_lowest_points(env_ids=env_ids)
-        site_height = self.target_site_corners_world[1,2] - self.target_site_corners_world[0,2]      # tensor (meters)
-        inside_site = self._get_inside_site(env_ids=env_ids)          # bool tensor
-
-        # Stage 1
-        stage = grasped.float()
-
-        # Stage 2: grasped AND height > 0.10 m
-        
-        stage = torch.where(
-            grasped & (object_lowest_point > site_height),
-            torch.full_like(stage, 2.0),
-            stage
-        )
-
-        # Stage 3: grasped AND inside_site
-        stage = torch.where(
-            grasped & inside_site,
-            torch.full_like(stage, 3.0),
-            stage
-        )
-        return stage # [self.num_envs, 1]
 
     def _get_rewards_test(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         import torch
