@@ -217,14 +217,14 @@ class TestStageAsFeedback(DirectRLEnv):
         self.target_object_name = "alphabet_soup"
         self.target_site_name = "basket"
         self.input_direction = 2 # z axis
-        if self.input_direction is not 2:
+        if self.input_direction != 2:
             raise NotImplementedError("Change the _get_dones method and other calculations for deciding the entry size")
         self.path = f"{self.root}/libero/trajs/libero90/libero_90_living_room_scene1_pick_up_the_{self.target_object_name}_and_put_it_in_the_basket_traj_v2.pkl"
 
         start_idx_in_episode_dict = {
             "alphabet_soup":0,
             "cream_cheese":0,
-            "ketchup":0, # 80
+            "ketchup":80, # 80
             "tomato_sauce":0,
         }
         self.start_idx_in_episode = start_idx_in_episode_dict[self.target_object_name] # for cream_cheese
@@ -743,7 +743,8 @@ class TestStageAsFeedback(DirectRLEnv):
 
         # self.manipulability = self._compute_manipulability() # [num_envs] Always have reward on this to have correct robot motion
         # self.stage = self._current_stage_detection().unsqueeze(1) # [num_envs, 1] 0 for beginning, 1 for object being successfully grasped, 2 for object being lifted to desired height, 3 for object is right above the basket.
-
+        # For stage 0, you should keep robot hand upstraight, that means, you apply enough penalty on self.hand_quat.
+        # Focus on one stage first, and explore new stage when you finish preivous one!
 
 
         obs = torch.cat(
