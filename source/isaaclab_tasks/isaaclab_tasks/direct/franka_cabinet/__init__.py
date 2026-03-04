@@ -26,7 +26,7 @@ for k, v in task_dict.items():
         kwargs={
             "env_cfg_entry_point": f"{__name__}.{v}:{k}Cfg",
             "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
-            "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:TestPutItInTheBasketPPORunnerCfg",
+            "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:{k}PPORunnerCfg",
             "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
         },
     )
