@@ -527,6 +527,8 @@ class TestPickItUp(DirectRLEnv):
         self.hand_quat = torch.zeros((self.num_envs, 4), device=self.device) 
         self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
         self.manipulability = torch.zeros((self.num_envs), device=self.device)
+        self.to_desired_rot = torch.zeros((self.num_envs, 4), device=self.device)
+        self.q_rel = torch.tensor([0, 0, 0.707, 0.707], device=self.device).repeat(self.num_envs, 1)
 
     def _setup_scene(self):
         # init_states = self.data['franka'][0]["init_state"] # this is from the first scene as set up. Init states of traj should be updated in reset_idx
@@ -663,6 +665,7 @@ class TestPickItUp(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         # manual update for observation needed values
         self._compute_intermediate_values()
+        self.to_desired_rot = quat_mul(quat_conjugate(self.robot_grasp_rot), self.q_rel)
         self.manipulability = self._compute_manipulability() # [num_envs] Always have reward on this to have correct robot motion
 
 
@@ -686,6 +689,8 @@ class TestPickItUp(DirectRLEnv):
         target_object_current_pose_inv = quat_conjugate(target_object_current_pose)
         # relative rotation
         q_error = quat_mul(target_object_desired_pose, target_object_current_pose_inv)
+        q_error = q_error / torch.norm(q_error, dim=-1, keepdim=True).clamp_min(1e-9)
+        q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
         angle_error = 2 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
         small_rotation = angle_error < 0.09
         terminated = small_rotation & high_enough & grasped.bool().squeeze() # about 5 degrees
@@ -721,7 +726,8 @@ class TestPickItUp(DirectRLEnv):
             object.write_root_velocity_to_sim(object_default_state[:, 7:], env_ids)
 
         self._compute_intermediate_values(env_ids=env_ids)
-        
+        q_rel = self.q_rel[env_ids]
+        self.to_desired_rot[env_ids] = quat_mul(quat_conjugate(self.robot_grasp_rot[env_ids]), q_rel)
         self.helper_variable[env_ids] = torch.zeros((len(env_ids), 10), device=self.device)
 
 
@@ -738,7 +744,6 @@ class TestPickItUp(DirectRLEnv):
         )
         self.corners_target_obj_to_hand_pos =  (self.corners_target_obj - self.robot_grasp_pos.unsqueeze(1)).reshape(self.num_envs, -1) # corners to robot dist described in world coordinate.
         self.target_to_hand_pos = self.target_object.data.root_pos_w - self.robot_grasp_pos # n, 3
-        self.hand_quat = self._robot.data.body_quat_w[:, self.hand_link_idx]
         tcp_vel = (self._robot.data.body_link_lin_vel_w[:,self.left_finger_body_idx] + self._robot.data.body_link_lin_vel_w[:,self.right_finger_body_idx])/2
         target_to_hand_vel = self.target_object.data.root_lin_vel_w - tcp_vel
         # add velocity
@@ -746,8 +751,7 @@ class TestPickItUp(DirectRLEnv):
         self.site_to_target_pos = self.target_site.data.root_pos_w - self.target_object.data.root_pos_w
         site_to_target_vel = self.target_object.data.root_lin_vel_w - self.target_site.data.root_lin_vel_w
         # self.target_site_corners_world # you can read the three dim from the [2, 3] tensor storing min(first row) and max corner of the site in local env frame
-
-        grasped = self._grasp_detection().float() # [num_envs, 1] 1 means two fingers have contact force against object, thereby grasping
+        grasped = self._grasp_detection().float() # [num_envs, 1] 1 means two fingers have contact force against object
         # self.manipulability = self._compute_manipulability() # [num_envs] Always have reward on this to have correct robot motion
         obs = torch.cat(
             (
@@ -755,11 +759,11 @@ class TestPickItUp(DirectRLEnv):
                 self._robot.data.joint_vel * self.cfg.dof_velocity_scale,
                 self.corners_target_obj_to_hand_pos, # this should be small
                 self.target_to_hand_pos, # relative position from target object center to hand should be small
-                self.hand_quat, # be close to inital orientation (pointing downwards is good, allows z axis rotation(Hint:When 0 and 3 element is zero, hand is pointing downwards)
-                self.site_to_target_pos, # relative position in x y from target site to target object
+                self.to_desired_rot, # the quaterion that goes from current to desired quat, apply reward on grasp pose not on object pose, otherwise can't learn anything due to constant failure.
+                self.site_to_target_pos, # relative position from target site to target object
                 target_to_hand_vel,
                 site_to_target_vel,
-                grasped, # 1 or 0, indicating whether is grasped or not.
+                grasped, # 1 or 0, indicating whether two force sensors on fingers have contact force.
             ),
             dim=-1,
         )
