@@ -214,10 +214,10 @@ class TestPutItInTheBasket(DirectRLEnv):
 
 
         self.root = eureka_root_dir()
-        self.target_object_name = "ketchup"
+        self.target_object_name = "alphabet_soup"
         self.target_site_name = "basket"
         self.input_direction = 2 # z axis
-        if self.input_direction is not 2:
+        if self.input_direction != 2:
             raise NotImplementedError("Change the _get_dones method and other calculations for deciding the entry size")
         self.path = f"{self.root}/libero/trajs/libero90/libero_90_living_room_scene1_pick_up_the_{self.target_object_name}_and_put_it_in_the_basket_traj_v2.pkl"
 
@@ -517,6 +517,31 @@ class TestPutItInTheBasket(DirectRLEnv):
         self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
         self.manipulability = torch.zeros((self.num_envs), device=self.device)
 
+
+        # # Specific to in the air task, randomize the initialization
+        self.update_rate = 0
+        self.base = torch.tensor([ 91,  66,  67, 110,  66,  84, 106,  81,  54,  83,  72,  63,  68,  63,
+                    57,  58,  72,  84,  76,  72,  62,  63,  85,  70,  72,  60,  68,  70,
+                    64,  69,  85,  89,  77,  71,  74,  69,  64,  65,  70, 101,  72,  80,
+                    61,  58,  74,  72,  61,  84,  60,  67], device=self.device)
+
+        # # Repeat/tile until we have at least num_envs elements
+        # repeat_times = (self.num_envs + base.numel() - 1) // base.numel()  # ceiling division
+        # tiled = base.repeat(repeat_times)[:self.num_envs]  # crop to exact length
+
+        # # Add random integers [0,20)
+        # rand_add = torch.randint(low=0, high=21, size=(self.num_envs,), device=self.device)
+
+        # # Final tensor
+        # in_the_air_matrix = tiled + rand_add
+        # self.object_default_state = torch.zeros((self.num_envs, 13), device=self.device)
+        # num_episodes = len(self.episodes)
+        # for i in range(num_episodes):
+        #     # i-th episode gets a column in object_default_state
+        #     # Use modulo if num_envs < num_episodes
+        #     self.object_default_state[:, i % self.object_default_state.shape[1]] = in_the_air_matrix
+
+
     def _setup_scene(self):
         # init_states = self.data['franka'][0]["init_state"] # this is from the first scene as set up. Init states of traj should be updated in reset_idx
         # init_states = self.data['franka'][0]["states"][100]
@@ -676,6 +701,34 @@ class TestPutItInTheBasket(DirectRLEnv):
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         super()._reset_idx(env_ids)
+        self.update_rate += 1
+        if self.update_rate%10 == 0:
+        # update default root states for random initialization
+            rand_episode_idx = torch.randint(low=0, high=50, size=(1,), device=self.device).item()
+            start_idx_in_episode = self.base[rand_episode_idx]
+            rand_int = torch.randint(low=0, high=21, size=(1,), device=self.device).item()
+            idx = start_idx_in_episode + rand_int
+            print(idx)
+            print(len(self.data['franka'][rand_episode_idx]["states"]))
+            init_states = self.data['franka'][rand_episode_idx]["states"][idx]
+            robot_data = init_states['franka'] # seems that joint pos for isaaclab is always positive
+            robot_joint_pos = robot_data["dof_pos"]
+            # print(f"robot_joint_pos:{robot_joint_pos}")
+            robot_joint_pos['panda_finger_joint2'] = robot_joint_pos['panda_finger_joint1']
+            # print(f"robot_joint_pos:{robot_joint_pos}")
+            robot_joint_pos = {k: v.item() for k, v in robot_joint_pos.items()}
+            joint_values = torch.tensor(list(robot_joint_pos.values()), device=self.device)
+            self._robot.data.default_joint_pos[env_ids] = joint_values.unsqueeze(0).repeat(len(env_ids), 1)
+
+            for object_name in self.object_names:
+                object = self.rigid_objects[object_name]
+                pos = torch.tensor(init_states[object_name]["pos"], device=self.device)
+                rot = torch.tensor(init_states[object_name]["rot"], device=self.device)
+
+                object.data.default_root_state[env_ids, 0:3] = pos.unsqueeze(0).repeat(len(env_ids), 1)
+                object.data.default_root_state[env_ids, 3:7] = rot.unsqueeze(0).repeat(len(env_ids), 1)
+
+
         # robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids] # TODO: recover randomization and test
         joint_pos = torch.clamp(joint_pos, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
@@ -687,7 +740,7 @@ class TestPutItInTheBasket(DirectRLEnv):
         for object_name in self.object_names:
             object = self.rigid_objects[object_name]
             object_default_state = object.data.default_root_state.clone()[env_ids]
-
+            # object_default_state = self.object_default_state.clone()[env_ids]
             object_default_state[:, 0:3] = (
                 object_default_state[:, 0:3] + self.scene.env_origins[env_ids]
             )
@@ -903,6 +956,12 @@ class TestPutItInTheBasket(DirectRLEnv):
             new_states.append(states[-1])
             return new_states
         
+        detect_grasp = False
+        if detect_grasp:
+            in_the_air_matrix = torch.full(
+                (num_episodes,), -1, dtype=torch.long, device=self.device
+            )
+            print(f"in_the_air_matrix{in_the_air_matrix}")
         # 5. Fill tensors
         with torch.inference_mode():
             for env_idx, ep in enumerate(self.episodes): # each episode
@@ -952,7 +1011,7 @@ class TestPutItInTheBasket(DirectRLEnv):
                         self.sim.render()
                 self.scene.update(dt=self.physics_dt)
 
-                detect_grasp = False
+               
                 if detect_grasp:
                     # update self.robot_grasp_pos
                     _,_ = self._get_dones()
@@ -960,10 +1019,17 @@ class TestPutItInTheBasket(DirectRLEnv):
                     # print(diff[0]) # play the first episode to check the constant object-hand distance
                     diff_norm = torch.norm(diff, dim=-1)  # shape: (n,)
                     # 0.09 ketchup/ 0.03 cream_cheese 0.1 alphabet_soup
+                    
+                    if t > 20:
+                        obj_z = self.target_object.data.root_pos_w[env_ids, 2]  # (num_envs,)
+                        in_air = obj_z > 0.1                              # (num_envs,) bool
+                        new_air_envs = torch.nonzero(in_air & (in_the_air_matrix == -1), as_tuple=False).squeeze(-1)
+                        in_the_air_matrix[new_air_envs] = t
+
                     if self.target_object.data.root_pos_w[0,2] > 0.1: # check if the grasp is stable (object-hand distance is small) and the object is lifted up (z is large), which should happen at the end of episode when the agent learns to lift up the object while keeping a stable grasp
                         print(f"timestep {t}: object in the air")
-                    print(diff_norm[0]) # should be small and constant if the grasp is stable, which is the case for most of the episode, except at the end when the object is lifted up and the grasp is broken. This matches with the observation that the agent learns to keep a stable grasp and lift up the object at the end of training.
-                    print(self.target_object.data.root_pos_w[0,2]) # also check the object position, should be lifted up at the end of episode
+                    # print(diff_norm[0]) # should be small and constant if the grasp is stable, which is the case for most of the episode, except at the end when the object is lifted up and the grasp is broken. This matches with the observation that the agent learns to keep a stable grasp and lift up the object at the end of training.
+                    # print(self.target_object.data.root_pos_w[0,2]) # also check the object position, should be lifted up at the end of episode
                     # _ = self._get_observations() # this will update the corners_target_obj_to_hand_pos, which is the relative position from object corners to hand in world coordinate, should be small if the grasp is stable. This is a more direct way to check the grasp stability, and also provides more information about the relative position between the hand and the object, which can be useful for reward design.
                     # print(self.corners_target_obj_to_hand_pos[0])
 
@@ -987,7 +1053,8 @@ class TestPutItInTheBasket(DirectRLEnv):
                         eureka_episode_sums[key] += rewards_dict_replay[key]
                 else:
                     print("WARNING: No function is named _get_rewards_eureka")
-
+            if detect_grasp:
+                print(in_the_air_matrix)
                 # After all replay is done, devide by episode length, and record
             for k in eureka_episode_sums.keys():
                 per_ep_value = eureka_episode_sums[k] /self.max_episode_length_s
