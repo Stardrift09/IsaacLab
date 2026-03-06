@@ -1136,8 +1136,10 @@ class TestPutItInTheBasket(DirectRLEnv):
 
 
     def _grasp_detection(self):
-        grasped_left = self.scene["left_contact_sensor"].data.current_contact_time > 0
-        grasped_right = self.scene["right_contact_sensor"].data.current_contact_time > 0
+        left_force = torch.norm(self.scene["left_contact_sensor"].data.force_matrix_w, dim=-1)
+        grasped_left = (left_force > 0).any(dim=(1, 2)).unsqueeze(1)  # (N,)
+        right_force = torch.norm(self.scene["right_contact_sensor"].data.force_matrix_w, dim=-1)
+        grasped_right = (right_force > 0).any(dim=(1, 2)).unsqueeze(1)  # (N,)
         grasped = grasped_left & grasped_right
         return grasped
    
