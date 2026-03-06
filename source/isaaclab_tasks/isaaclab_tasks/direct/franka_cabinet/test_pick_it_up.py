@@ -1111,9 +1111,9 @@ class TestPickItUp(DirectRLEnv):
         threshold = 0.05
         always_small = torch.all(self.past_relative_dist[env_ids] < threshold, dim=1).unsqueeze(1)
         left_force = torch.norm(self.scene["left_contact_sensor"].data.force_matrix_w[env_ids], dim=-1)
-        grasped_left = (left_force > 0).any(dim=(1, 2))  # (N,) # TODO: use squeeze first?
+        grasped_left = (left_force > 0).any(dim=(1, 2)).unsqueeze(1)  # (N,) # TODO: use squeeze first?
         right_force = torch.norm(self.scene["right_contact_sensor"].data.force_matrix_w[env_ids], dim=-1)
-        grasped_right = (right_force > 0).any(dim=(1, 2))  # (N,)
+        grasped_right = (right_force > 0).any(dim=(1, 2)).unsqueeze(1)  # (N,)
         grasped = grasped_left & grasped_right & always_small
         return grasped
    
