@@ -451,7 +451,7 @@ class TestPickItUp(DirectRLEnv):
         self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
         self.manipulability = torch.zeros((self.num_envs), device=self.device)
         self.to_desired_rot = torch.zeros((self.num_envs, 4), device=self.device)
-        self.q_rel = torch.tensor([0, 0, 0.707, 0.707], device=self.device).repeat(self.num_envs, 1)
+        self.q_rel = torch.tensor([ 0.0014,  0.9270,  0.3749,  0.0036], device=self.device).repeat(self.num_envs, 1)
         self.past_relative_dist = torch.ones((self.num_envs,10), device=self.device)
         self.grasped = torch.zeros((self.num_envs, 1), device=self.device, dtype=bool)
 
@@ -626,21 +626,21 @@ class TestPickItUp(DirectRLEnv):
         # dist2 = ((obj_xy - site_pos)**2).sum(dim=-1)
         # inside_site = dist2 < self.target_site_radius**2
         # terminated = inside_site & low_enough
-        grasped = self._grasp_detection() # [num_envs, 1]
+        self.grasped = self._grasp_detection() # [num_envs, 1]
         object_default_state = self.target_object.data.default_root_state.clone()
         high_enough = self.target_object.data.root_pos_w[:, 2] > object_default_state[:,self.input_direction] + 0.05
         # quaternions are (w, x, y, z)
-        target_object_current_pose = self.target_object.data.root_quat_w        # shape (N, 4)
-        target_object_desired_pose = object_default_state[:,3:7]         # shape (N, 4)
-        # inverse of current
-        target_object_current_pose_inv = quat_conjugate(target_object_current_pose)
-        # relative rotation
-        q_error = quat_mul(target_object_desired_pose, target_object_current_pose_inv)
-        q_error = q_error / torch.norm(q_error, dim=-1, keepdim=True).clamp_min(1e-9)
-        q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
-        angle_error = 2 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
-        small_rotation = angle_error < 0.09
-        terminated = small_rotation & high_enough & grasped.bool().squeeze() # about 5 degrees
+        # target_object_current_pose = self.target_object.data.root_quat_w        # shape (N, 4)
+        # target_object_desired_pose = object_default_state[:,3:7]         # shape (N, 4)
+        # # inverse of current
+        # target_object_current_pose_inv = quat_conjugate(target_object_current_pose)
+        # # relative rotation
+        # q_error = quat_mul(target_object_desired_pose, target_object_current_pose_inv)
+        # q_error = q_error / torch.norm(q_error, dim=-1, keepdim=True).clamp_min(1e-9)
+        # q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
+        # angle_error = 2 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
+        # small_rotation = angle_error < 0.09
+        terminated = high_enough & self.grasped.bool().squeeze() # about 5 degrees
         # print(f"small_rotation{small_rotation}")
         # print(f"high_enough{high_enough}")
         # print(f"grasped{grasped}")
@@ -708,7 +708,7 @@ class TestPickItUp(DirectRLEnv):
         q_rel = self.q_rel[env_ids]
         self.to_desired_rot[env_ids] = quat_mul(quat_conjugate(self.robot_grasp_rot[env_ids]), q_rel)
         self.helper_variable[env_ids] = torch.zeros((len(env_ids), 10), device=self.device)
-
+        self.grasped[env_ids] = self._grasp_detection(env_ids)
 
     def _get_observations(self) -> dict:
         """
@@ -779,7 +779,7 @@ class TestPickItUp(DirectRLEnv):
 
 
 
-    def run_replay(self, log_dir:str, render:bool=False):
+    def run_replay(self, log_dir:str, render:bool=False, detect_grasp:bool=False):
         libero_dt = 1/20
         import numpy as np
         #TODO: make sure number of envs are enough for replay
@@ -913,7 +913,6 @@ class TestPickItUp(DirectRLEnv):
             new_states.append(states[-1])
             return new_states
         
-        detect_grasp = False
         if detect_grasp:
             in_the_air_matrix = torch.full(
                 (num_episodes,), -1, dtype=torch.long, device=self.device
@@ -984,7 +983,8 @@ class TestPickItUp(DirectRLEnv):
                         in_the_air_matrix[new_air_envs] = t
 
                     if self.target_object.data.root_pos_w[0,2] > 0.1: # check if the grasp is stable (object-hand distance is small) and the object is lifted up (z is large), which should happen at the end of episode when the agent learns to lift up the object while keeping a stable grasp
-                        print(f"timestep {t}: object in the air")
+                        # print(f"timestep {t}: object in the air")
+                        print(self.robot_grasp_rot)
                     # print(diff_norm[0]) # should be small and constant if the grasp is stable, which is the case for most of the episode, except at the end when the object is lifted up and the grasp is broken. This matches with the observation that the agent learns to keep a stable grasp and lift up the object at the end of training.
                     # print(self.target_object.data.root_pos_w[0,2]) # also check the object position, should be lifted up at the end of episode
                     # _ = self._get_observations() # this will update the corners_target_obj_to_hand_pos, which is the relative position from object corners to hand in world coordinate, should be small if the grasp is stable. This is a more direct way to check the grasp stability, and also provides more information about the relative position between the hand and the object, which can be useful for reward design.
