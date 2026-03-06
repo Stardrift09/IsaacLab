@@ -793,10 +793,9 @@ class TestPutItInTheBasket(DirectRLEnv):
             ),
             dim=-1,
         )
-        # print(self.target_object.data.root_pos_w[0,2])
-        # print(self.scene["left_contact_sensor"].data.current_contact_time)
-        # print(self.scene["right_contact_sensor"].data.current_contact_time)
-        # print(self.scene.sensors["finger_contact_sensor"].data.force_matrix_w)
+        print(self.scene["right_contact_sensor"].data.current_contact_time)
+        print(self.scene["right_contact_sensor"].data.force_matrix_w)
+        print(self.scene["right_contact_sensor"].data.force_matrix_w_history.shape)
         return {"policy": torch.clamp(obs, -5.0, 5.0)}
 
 
@@ -1011,7 +1010,6 @@ class TestPutItInTheBasket(DirectRLEnv):
                         self.sim.render()
                 self.scene.update(dt=self.physics_dt)
 
-               
                 if detect_grasp:
                     # update self.robot_grasp_pos
                     _,_ = self._get_dones()
