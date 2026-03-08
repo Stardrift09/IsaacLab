@@ -514,21 +514,21 @@ class TestPickItUp(DirectRLEnv):
             actuators={
                 "panda_shoulder": ImplicitActuatorCfg(
                     joint_names_expr=["panda_joint[1-4]"],
-                    effort_limit_sim=300.0,
-                    stiffness=1500.0,
-                    damping=200.0,
+                    effort_limit_sim=87.0,
+                    stiffness=400.0,
+                    damping=40.0,
                 ),
                 "panda_forearm": ImplicitActuatorCfg(
                     joint_names_expr=["panda_joint[5-7]"],
-                    effort_limit_sim=150.0,
-                    stiffness=1200.0,
-                    damping=180.0,
+                    effort_limit_sim=12.0,
+                    stiffness=350.0,
+                    damping=35.0,
                 ),
                 "panda_hand": ImplicitActuatorCfg(
                     joint_names_expr=["panda_finger_joint.*"],
-                    effort_limit_sim=500.0,
-                    stiffness=8000.0,
-                    damping=400.0,
+                    effort_limit_sim=200.0,
+                    stiffness=3000.0,
+                    damping=200.0,
                 ),
             }
         )
@@ -631,24 +631,24 @@ class TestPickItUp(DirectRLEnv):
         # terminated = inside_site & low_enough
         self.grasped = self._grasp_detection() # [num_envs, 1]
         object_default_state = self.target_object.data.default_root_state.clone()
-        high_enough = self.target_object.data.root_pos_w[:, 2] > object_default_state[:,self.input_direction] + 0.05
+        high_enough = self.target_object.data.root_pos_w[:, 2] > object_default_state[:,self.input_direction] + 0.1
         # quaternions are (w, x, y, z)
-        # target_object_current_pose = self.target_object.data.root_quat_w        # shape (N, 4)
-        # target_object_desired_pose = object_default_state[:,3:7]         # shape (N, 4)
-        # # inverse of current
-        # target_object_current_pose_inv = quat_conjugate(target_object_current_pose)
-        # # relative rotation
-        # q_error = quat_mul(target_object_desired_pose, target_object_current_pose_inv)
-        # q_error = q_error / torch.norm(q_error, dim=-1, keepdim=True).clamp_min(1e-9)
-        # q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
-        # angle_error = 2 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
-        # small_rotation = angle_error < 0.09
-        terminated = high_enough & self.grasped.bool().squeeze() # about 5 degrees
+        target_object_current_pose = self.target_object.data.root_quat_w        # shape (N, 4)
+        target_object_desired_pose = object_default_state[:,3:7]         # shape (N, 4)
+        # inverse of current
+        target_object_current_pose_inv = quat_conjugate(target_object_current_pose)
+        # relative rotation
+        q_error = quat_mul(target_object_desired_pose, target_object_current_pose_inv)
+        q_error = q_error / torch.norm(q_error, dim=-1, keepdim=True).clamp_min(1e-9)
+        q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
+        angle_error = 2 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
+        small_rotation = angle_error < 0.09
+        terminated = high_enough & self.grasped.bool().squeeze() & small_rotation # about 5 degrees
         # print(f"small_rotation{small_rotation}")
         # print(f"high_enough{high_enough}")
         # print(f"grasped{grasped}")
         truncated = self.episode_length_buf >= self.max_episode_length - 1
-        # terminated_count = terminated.sum().item()
+        # terminated_count = high_enough.sum().item()
         # truncated_count = truncated.sum().item()
 
         # ratio = terminated_count / (truncated_count + 1e-8)
