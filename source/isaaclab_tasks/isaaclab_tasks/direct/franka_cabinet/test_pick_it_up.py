@@ -642,7 +642,7 @@ class TestPickItUp(DirectRLEnv):
         q_error = q_error / torch.norm(q_error, dim=-1, keepdim=True).clamp_min(1e-9)
         q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
         angle_error = 2 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
-        small_rotation = angle_error < 0.09
+        small_rotation = angle_error < 0.8
         terminated = high_enough & self.grasped.bool().squeeze() & small_rotation # about 5 degrees
         # print(f"small_rotation{small_rotation}")
         # print(f"high_enough{high_enough}")
