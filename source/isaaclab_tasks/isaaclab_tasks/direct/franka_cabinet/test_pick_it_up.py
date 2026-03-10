@@ -25,6 +25,7 @@ from torch.utils.tensorboard import SummaryWriter
 # from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.sensors.contact_sensor.contact_sensor import ContactSensor
 from isaaclab.sensors import ContactSensorCfg
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 
 import pdb
 from isaaclab_eureka.utils import eureka_root_dir, read_pkl
@@ -186,7 +187,7 @@ class TestPickItUpCfg(DirectRLEnvCfg):
         ),
     )
 
-    action_scale = 7.5
+    action_scale = 1.5 # 7.5 originally
     dof_velocity_scale = 0.1
 
     # reward scales
@@ -210,7 +211,12 @@ class TestPickItUp(DirectRLEnv):
     cfg: TestPickItUpCfg
 
     def __init__(self, cfg: TestPickItUpCfg, render_mode: str | None = None, **kwargs):
-    
+        self.debug_vis = False
+        # Only when debug_vis is true:
+        self.show_robot_grasp=True
+        self.show_target_object=False
+        self.show_target_grasp_pose=True
+
         self.log_mine = False
         self.start_in_air = False
         self.root = eureka_root_dir()
@@ -454,7 +460,7 @@ class TestPickItUp(DirectRLEnv):
         self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
         self.manipulability = torch.zeros((self.num_envs), device=self.device)
         self.to_desired_rot = torch.zeros((self.num_envs, 4), device=self.device)
-        self.q_rel = torch.tensor([ 0.0014,  0.9270,  0.3749,  0.0036], device=self.device).repeat(self.num_envs, 1)
+        self.q_rel = torch.tensor([-0.0238,  0.9797, -0.1958,  0.0350], device=self.device).repeat(self.num_envs, 1)
         self.past_relative_dist = torch.ones((self.num_envs,10), device=self.device)
         self.grasped = torch.zeros((self.num_envs, 1), device=self.device, dtype=bool)
 
@@ -481,6 +487,10 @@ class TestPickItUp(DirectRLEnv):
         #     # Use modulo if num_envs < num_episodes
         #     self.object_default_state[:, i % self.object_default_state.shape[1]] = in_the_air_matrix
 
+        # Adding a visualizer
+        if self.debug_vis:
+            self.visualizer = self.define_markers()
+            print("Debug visualizer initialized")
 
     def _setup_scene(self):
         # init_states = self.data['franka'][0]["init_state"] # this is from the first scene as set up. Init states of traj should be updated in reset_idx
@@ -506,6 +516,7 @@ class TestPickItUp(DirectRLEnv):
                     enabled_self_collisions=False, solver_position_iteration_count=12, solver_velocity_iteration_count=1
                 ),
             ),
+            debug_vis=True,
             init_state=ArticulationCfg.InitialStateCfg(
                 joint_pos=robot_joint_pos,
                 pos=robot_data["pos"],
@@ -514,19 +525,19 @@ class TestPickItUp(DirectRLEnv):
             actuators={
                 "panda_shoulder": ImplicitActuatorCfg(
                     joint_names_expr=["panda_joint[1-4]"],
-                    effort_limit_sim=87.0,
-                    stiffness=400.0,
-                    damping=40.0,
+                    effort_limit_sim=300.0,
+                    stiffness=1500.0,
+                    damping=200.0,
                 ),
                 "panda_forearm": ImplicitActuatorCfg(
                     joint_names_expr=["panda_joint[5-7]"],
-                    effort_limit_sim=12.0,
-                    stiffness=350.0,
-                    damping=35.0,
+                    effort_limit_sim=150.0,
+                    stiffness=1200.0,
+                    damping=180.0,
                 ),
                 "panda_hand": ImplicitActuatorCfg(
                     joint_names_expr=["panda_finger_joint.*"],
-                    effort_limit_sim=200.0,
+                    effort_limit_sim=500.0,
                     stiffness=3000.0,
                     damping=200.0,
                 ),
@@ -546,14 +557,17 @@ class TestPickItUp(DirectRLEnv):
             if k == self.target_object_name:
                 print(f"target object {k} initial z height: {init_states[k]['pos'][2]}")
                 activate_contact_sensors=True
+                debug_vis=True
             else:
                 activate_contact_sensors = False
+                debug_vis=False
             cfg = RigidObjectCfg(
                 prim_path=f"/World/envs/env_.*/{k}",
                 init_state=RigidObjectCfg.InitialStateCfg(
                     pos=init_states[k]["pos"],
                     rot=init_states[k]["rot"],
                 ),
+                debug_vis=debug_vis,
                 spawn=sim_utils.UsdFileCfg(
                     usd_path=f"{self.root}/libero/COMMON/stable_hope_objects/{k}/usd/{k}.usd",
                     activate_contact_sensors=activate_contact_sensors,
@@ -589,6 +603,16 @@ class TestPickItUp(DirectRLEnv):
             prim_path="/World/envs/env_.*/Robot/panda_rightfinger", update_period=0.0, history_length=10, 
             track_air_time=True, filter_prim_paths_expr=[f"/World/envs/env_.*/{self.target_object_name}/object"],
         )
+        # left_contact_sensor_cfg = ContactSensorCfg(
+        #     prim_path="/World/envs/env_.*/Robot/panda_leftfinger", update_period=0.0, history_length=10,
+        #     track_contact_points=True, max_contact_data_count_per_prim=4,
+        #     track_air_time=True, filter_prim_paths_expr=[f"/World/envs/env_.*/{self.target_object_name}/object"],
+        # )
+        # right_contact_sensor_cfg = ContactSensorCfg(
+        #     prim_path="/World/envs/env_.*/Robot/panda_rightfinger", update_period=0.0, history_length=10,
+        #     track_contact_points=True, max_contact_data_count_per_prim=4,
+        #     track_air_time=True, filter_prim_paths_expr=[f"/World/envs/env_.*/{self.target_object_name}/object"],
+        # )
         self._left_contact_sensors = ContactSensor(left_contact_sensor_cfg)
         self._right_contact_sensors = ContactSensor(right_contact_sensor_cfg)
         self.scene.sensors["left_contact_sensor"] = self._left_contact_sensors
@@ -643,7 +667,7 @@ class TestPickItUp(DirectRLEnv):
         q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
         angle_error = 2 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
         small_rotation = angle_error < 0.8
-        terminated = high_enough & self.grasped.bool().squeeze() & small_rotation # about 5 degrees
+        terminated = high_enough & self.grasped.bool().squeeze() & small_rotation
         # print(f"small_rotation{small_rotation}")
         # print(f"high_enough{high_enough}")
         # print(f"grasped{grasped}")
@@ -653,6 +677,30 @@ class TestPickItUp(DirectRLEnv):
 
         # ratio = terminated_count / (truncated_count + 1e-8)
         # print(ratio)
+
+
+        if self.debug_vis:
+            translations_list = [
+                x for flag, x in [
+                    (self.show_robot_grasp, self.robot_grasp_pos),
+                    (self.show_target_object, self.target_object.data.root_pos_w),
+                    (self.show_target_grasp_pose, self.target_object.data.root_pos_w),
+                ] if flag
+            ]
+            translations = torch.cat(translations_list, dim=0) if translations_list else None
+            
+            orientations_list = [
+                x for flag, x in [
+                    (self.show_robot_grasp, self.robot_grasp_rot),
+                    (self.show_target_object, self.target_object.data.root_quat_w),
+                    (self.show_target_grasp_pose, self.q_rel),
+                ] if flag
+            ]
+            orientations = torch.cat(orientations_list, dim=0) if orientations_list else None
+
+            self.visualizer.visualize(translations=translations,
+                                    orientations=orientations,
+                                    )
 
         if self.log_mine:
             for i in range(20):
