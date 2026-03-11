@@ -187,7 +187,7 @@ class TestPickItUpCfg(DirectRLEnvCfg):
         ),
     )
 
-    action_scale = 1.5 # 7.5 originally
+    action_scale = 7.5 # 7.5 originally
     dof_velocity_scale = 0.1
 
     # reward scales
@@ -211,7 +211,7 @@ class TestPickItUp(DirectRLEnv):
     cfg: TestPickItUpCfg
 
     def __init__(self, cfg: TestPickItUpCfg, render_mode: str | None = None, **kwargs):
-        self.debug_vis = False
+        self.debug_vis = True
         # Only when debug_vis is true:
         self.show_robot_grasp=True
         self.show_target_object=False
@@ -561,6 +561,7 @@ class TestPickItUp(DirectRLEnv):
             else:
                 activate_contact_sensors = False
                 debug_vis=False
+            # if k == self.target_object_name or k==self.target_site_name: # Disable other objects for now
             cfg = RigidObjectCfg(
                 prim_path=f"/World/envs/env_.*/{k}",
                 init_state=RigidObjectCfg.InitialStateCfg(
@@ -1048,8 +1049,8 @@ class TestPickItUp(DirectRLEnv):
                     # update self.robot_grasp_pos
                     _,_ = self._get_dones()
                     _ = self._get_observations()
-                    for i in range(50):
-                        writer.add_scalar("Grasp/"+str(i), self.grasped[i], t) 
+                    # for i in range(50):
+                    #     writer.add_scalar("Grasp/"+str(i), self.grasped[i], t) 
                     diff = self.target_object.data.body_pos_w.squeeze(1) - self.robot_grasp_pos
                     # print(diff[0]) # play the first episode to check the constant object-hand distance
                     diff_norm = torch.norm(diff, dim=-1)  # shape: (n,)
@@ -1062,8 +1063,17 @@ class TestPickItUp(DirectRLEnv):
                         in_the_air_matrix[new_air_envs] = t
 
                     if self.target_object.data.root_pos_w[0,2] > 0.1: # check if the grasp is stable (object-hand distance is small) and the object is lifted up (z is large), which should happen at the end of episode when the agent learns to lift up the object while keeping a stable grasp
+                        print("logging")
+                        for k in range(50):
+                            writer.add_scalars("Position_error/"+str(k), 
+                                            {"x": diff[k,0], 
+                                            "y": diff[k,1], 
+                                            "z": diff[k,2], },
+                                            t)
                         # print(f"timestep {t}: object in the air")
-                        print(self.robot_grasp_rot)
+                        print(self.robot_grasp_rot[0])
+
+                        
                     # print(diff_norm[0]) # should be small and constant if the grasp is stable, which is the case for most of the episode, except at the end when the object is lifted up and the grasp is broken. This matches with the observation that the agent learns to keep a stable grasp and lift up the object at the end of training.
                     # print(self.target_object.data.root_pos_w[0,2]) # also check the object position, should be lifted up at the end of episode
                     # _ = self._get_observations() # this will update the corners_target_obj_to_hand_pos, which is the relative position from object corners to hand in world coordinate, should be small if the grasp is stable. This is a more direct way to check the grasp stability, and also provides more information about the relative position between the hand and the object, which can be useful for reward design.
@@ -1254,264 +1264,105 @@ class TestPickItUp(DirectRLEnv):
         return stage # [self.num_envs, 1]
 
 
+    def define_markers(self) -> VisualizationMarkers:
+        """Define markers with various different shapes."""
+        marker_cfg = VisualizationMarkersCfg(
+            prim_path="/Visuals/myMarkers",
+            markers={
+                "frame": sim_utils.UsdFileCfg(
+                    usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/frame_prim.usd",
+                    scale=(0.1, 0.1, 0.1),
+                ),
+            },
+        )
+        return VisualizationMarkers(marker_cfg)
 
-    def _get_rewards_test(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+
+
+
+
+
+    def _get_rewards_test_manipulability(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         import torch
 
-        device = self.device
-        n = self.num_envs
-        eps = 1e-6
+        eps = 1e-8
 
-        def _safe(x: torch.Tensor) -> torch.Tensor:
-            return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        # ------------------------------------------------------------------
+        # Inputs
+        # ------------------------------------------------------------------
+        tcp_pos = torch.nan_to_num(self.robot_grasp_pos)
+        target_pos = torch.nan_to_num(self.target_object.data.root_pos_w.clone())
+        target_pos[:, 2] += 0.2
 
-        # -------------------------------------------------------------------------
-        # Core state (sanitized)
-        # -------------------------------------------------------------------------
-        rel_pos = _safe(self.target_to_hand_pos)  # object_center - tcp, [n,3]
-        dx, dy, dz = rel_pos[:, 0], rel_pos[:, 1], rel_pos[:, 2]
-        xy_dist = torch.sqrt(dx * dx + dy * dy + eps)
-        dist = torch.sqrt(xy_dist * xy_dist + dz * dz + eps)
+        manipulability = torch.nan_to_num(self.manipulability).clamp(min=0.0)
 
-        # "10cm above object center" waypoint: tcp_z = obj_z + 0.10 -> dz = -0.10
-        dz_above = dz + 0.10
-        dist_above = torch.sqrt(dx * dx + dy * dy + dz_above * dz_above + eps)
+        # ------------------------------------------------------------------
+        # Position tracking
+        # ------------------------------------------------------------------
+        pos_delta = tcp_pos - target_pos
+        pos_error = torch.linalg.norm(pos_delta, dim=-1)
 
-        # Orientation: reward delta-quat w -> 1
-        wq = _safe(self.to_desired_rot[:, 0]).clamp(-1.0, 1.0)
-        ori_align = ((wq + 1.0) * 0.5).clamp(0.0, 1.0)
-        ori_err = (1.0 - ori_align).clamp(0.0, 1.0)
+        # Gaussian-style reward: smoother and more standard than exp(-d / c)
+        pos_sigma = 0.10
+        r_position = torch.exp(-(pos_error ** 2) / (2 * pos_sigma ** 2))
 
-        # Velocities (tcp approximated by finger avg)
-        tcp_vel = _safe(
-            0.5
-            * (
-                self._robot.data.body_link_lin_vel_w[:, self.left_finger_body_idx]
-                + self._robot.data.body_link_lin_vel_w[:, self.right_finger_body_idx]
-            )
-        )
-        tcp_speed = torch.linalg.norm(tcp_vel, dim=-1)
-        tcp_vxy = torch.linalg.norm(tcp_vel[:, :2], dim=-1)
-        tcp_vz = tcp_vel[:, 2]
+        # Optional: success-style bonus when very close
+        pos_close_thresh = 0.03
+        r_pos_bonus = (pos_error < pos_close_thresh).float()
 
-        obj_vel = _safe(self.target_object.data.root_lin_vel_w)
-        obj_speed = torch.linalg.norm(obj_vel, dim=-1)
+        # ------------------------------------------------------------------
+        # Orientation tracking
+        # Assumes self.to_desired_rot is the relative quaternion from current to desired
+        # Quaternion format assumed: [w, x, y, z]
+        # ------------------------------------------------------------------
+        q_error = torch.nan_to_num(self.to_desired_rot)
+        q_error = q_error / torch.linalg.norm(q_error, dim=-1, keepdim=True).clamp_min(eps)
 
-        rel_vel = _safe(obj_vel - tcp_vel)
-        rel_speed = torch.linalg.norm(rel_vel, dim=-1)
+        # Resolve quaternion sign ambiguity
+        q_error = torch.where(q_error[:, 0:1] < 0.0, -q_error, q_error)
 
-        # Gripper openness proxy from finger joints (last 2 dofs)
-        joint_pos = _safe(self._robot.data.joint_pos)
-        if joint_pos.shape[-1] >= 2:
-            finger_sum = joint_pos[:, -2:].sum(dim=-1)
-        else:
-            finger_sum = torch.zeros((n,), device=device)
+        # Angle in [0, pi]
+        qw = torch.clamp(q_error[:, 0], -1.0 + eps, 1.0 - eps)
+        angle_error = 2.0 * torch.acos(qw)
+        # print(angle_error)
+        print(self.robot_grasp_rot)
+        ori_sigma = 0.30
+        r_orientation_raw = torch.exp(-(angle_error ** 2) / (2 * ori_sigma ** 2))
 
-        # Success signals
-        grasped = _safe(self.grasped.float()).view(-1)
+        # Gate orientation reward by position proximity
+        # This prevents the policy from trying to perfectly orient while still far away
+        orientation_gate = torch.exp(-(pos_error ** 2) / (2 * (0.15 ** 2)))
+        r_orientation = orientation_gate * r_orientation_raw
 
-        object_default_state = _safe(self.target_object.data.default_root_state)
-        obj_z_default = _safe(object_default_state[:, self.input_direction])
-        obj_z = _safe(self.target_object.data.root_pos_w[:, 2])
-        lift_height = torch.clamp(obj_z - (obj_z_default + 0.05), 0.0, 0.35)
+        # Optional orientation success bonus
+        ori_close_thresh = 0.15  # radians
+        r_ori_bonus = ((angle_error < ori_close_thresh) & (pos_error < 0.05)).float()
 
-        manipulability = torch.clamp(_safe(self.manipulability).view(-1), 0.0, 10.0)
+        # ------------------------------------------------------------------
+        # Manipulability reward
+        # Keep small so it does not dominate tracking
+        # ------------------------------------------------------------------
+        r_manipulability = torch.tanh(manipulability)
 
-        # -------------------------------------------------------------------------
-        # Soft stage gates (avoid "always-on" terms that caused reward hacking)
-        # -------------------------------------------------------------------------
-        k = 60.0
-        gate_near = torch.sigmoid(-k * (dist - 0.07))         # within ~7cm
-        gate_very_near = torch.sigmoid(-k * (dist - 0.04))    # within ~4cm
-        gate_xy_good = torch.sigmoid(-k * (xy_dist - 0.020))  # within ~2cm
-        gate_xy_tight = torch.sigmoid(-k * (xy_dist - 0.012)) # within ~1.2cm
-
-        # tcp above object center => dz = obj - tcp < 0
-        gate_tcp_above = torch.sigmoid(-35.0 * (dz + 0.003))  # dz < -3mm
-
-        # Prefer approaching from above waypoint region (10cm above)
-        gate_above_wp = torch.sigmoid(-k * (dist_above - 0.05))  # within ~5cm of above waypoint
-
-        gate_ori_good = torch.sigmoid(40.0 * (0.06 - ori_err))  # ori_err < 0.06
-
-        pre = (1.0 - grasped) * (1.0 - gate_near)
-        approach = (1.0 - grasped) * gate_near
-        pocket = (1.0 - grasped) * gate_very_near * gate_xy_tight * gate_ori_good * gate_tcp_above
-        post = grasped
-
-        # -------------------------------------------------------------------------
-        # Bounded shaping rewards (temperatures)
-        # -------------------------------------------------------------------------
-        t_dist = 0.06
-        t_xy = 0.03
-        t_above = 0.05
-        t_ori = 0.12
-        t_speed = 0.30
-        t_rel = 0.22
-        t_lift = 0.08
-
-        r_close = torch.exp(-dist / t_dist).clamp(0.0, 1.0)
-        r_xy = torch.exp(-xy_dist / t_xy).clamp(0.0, 1.0)
-        r_above = torch.exp(-dist_above / t_above).clamp(0.0, 1.0)
-        r_ori = torch.exp(-ori_err / t_ori).clamp(0.0, 1.0)
-
-        r_slow_tcp = torch.exp(-tcp_speed / t_speed).clamp(0.0, 1.0)
-        r_slow_obj = torch.exp(-obj_speed / t_speed).clamp(0.0, 1.0)
-        r_slow = (0.8 * r_slow_tcp + 0.2 * r_slow_obj).clamp(0.0, 1.0)
-
-        r_gentle = torch.exp(-rel_speed / t_rel).clamp(0.0, 1.0)
-
-        r_lift = (1.0 - torch.exp(-lift_height / t_lift)).clamp(0.0, 1.0)
-
-        r_manip = torch.tanh(manipulability / 2.0).clamp(0.0, 1.0)
-
-        # Gripper open/close (kept but heavily gated to avoid constant reward)
-        r_open = torch.sigmoid(14.0 * (finger_sum - 0.02)).clamp(0.0, 1.0)
-        r_closed = torch.sigmoid(14.0 * (0.03 - finger_sum)).clamp(0.0, 1.0)
-
-        # Pocket alignment metric (sharper than before but still smooth)
-        # Encourage: very small xy_dist and dz close to 0 (tcp at object center height), while still approaching from above.
-        t_pocket = 0.55
-        pocket_metric = torch.sqrt((xy_dist / 0.012) ** 2 + (torch.abs(dz) / 0.025) ** 2 + eps)
-        r_pocket = torch.exp(-pocket_metric / t_pocket).clamp(0.0, 1.0)
-
-        # Descent control: small downward speed only when aligned/above/near
-        # Track a gentle downward speed band.
-        t_vz = 0.05
-        vz_des = -0.02
-        r_vz = torch.exp(-torch.abs(tcp_vz - vz_des) / t_vz).clamp(0.0, 1.0)
-        r_vxy = torch.exp(-tcp_vxy / 0.12).clamp(0.0, 1.0)
-        r_desc_ctrl = (0.6 * r_vz + 0.4 * r_vxy).clamp(0.0, 1.0)
-
-        # -------------------------------------------------------------------------
-        # Key fix vs bad runs:
-        # - In bad training, the policy got huge reward from always-on dense terms
-        #   and tolerated huge penalties; success stayed ~0.
-        # - Make dense terms small; make "pocket->close->grasp->lift" decisive.
-        # - Penalties must be mild and only near; otherwise agent avoids the object.
-        # -------------------------------------------------------------------------
-
-        # -------------------------------------------------------------------------
-        # Mild penalties (bounded; near-only)
-        # -------------------------------------------------------------------------
-        pen_push = gate_very_near * (1.0 - grasped) * torch.sigmoid(30.0 * (rel_speed - 0.10))
-        pen_sweep = gate_very_near * (1.0 - grasped) * torch.sigmoid(30.0 * (tcp_vxy - 0.12))
-        pen_fast_down = gate_very_near * (1.0 - grasped) * torch.sigmoid(40.0 * ((-tcp_vz) - 0.15))
-        pen_close_early = gate_near * (1.0 - grasped) * r_closed * (1.0 - pocket)
-
-        # -------------------------------------------------------------------------
-        # Weights (scaled so typical per-episode totals don't explode)
-        # -------------------------------------------------------------------------
-        w_above = 0.6
-        w_xy = 0.8
-        w_close = 0.8
-        w_ori = 0.25
-
-        # Keep gripper open only while not too near; otherwise don't shape much
-        w_open = 0.10
-
-        # Critical funnel to success:
-        w_pocket = 3.0
-        w_desc = 0.8
-        w_close_cmd = 6.0
-
-        # Sparse objectives:
-        w_grasp = 25.0
-        w_lift = 15.0
-
-        # Regularizer:
-        w_slow = 0.25
-        w_gentle = 0.30
-        w_manip = 0.15
-
-        # Penalties (mild):
-        w_pen_push = 0.6
-        w_pen_sweep = 0.3
-        w_pen_fast_down = 0.3
-        w_pen_close_early = 0.4
-
-        # -------------------------------------------------------------------------
-        # Weighted reward terms
-        # -------------------------------------------------------------------------
-        # Waypoint: go above first (pre only)
-        term_above = w_above * pre * r_above
-
-        # General approach (small, cannot dominate)
-        approach_from_above = (0.35 + 0.65 * gate_tcp_above).clamp(0.0, 1.0)
-        term_xy = w_xy * (pre + approach) * approach_from_above * r_xy
-        term_close = w_close * (pre + approach) * approach_from_above * r_close
-
-        # Orientation only matters meaningfully when approaching/near
-        term_ori = w_ori * (pre + approach + 0.5 * pocket + 0.2 * post) * r_ori
-
-        # Open gripper until very near
-        term_open = w_open * (pre + approach) * (1.0 - gate_very_near) * r_open
-
-        # Pocket alignment + controlled descent (near + above + oriented)
-        term_pocket = w_pocket * (approach + pocket) * gate_xy_good * gate_ori_good * r_pocket
-        term_desc = w_desc * (approach + pocket) * gate_above_wp * gate_xy_good * gate_ori_good * gate_tcp_above * r_desc_ctrl
-
-        # Close command: only in pocket and when slow/gentle to avoid pushing
-        term_close_cmd = w_close_cmd * pocket * r_closed * (0.6 * r_slow + 0.4 * r_gentle)
-
-        # Mild global motion quality (prevents jerky exploration, but low weight)
-        term_slow = w_slow * (0.4 * pre + 0.7 * approach + 0.9 * pocket + 1.2 * post) * r_slow
-        term_gentle = w_gentle * (0.4 * pre + 0.8 * approach + 1.0 * pocket + 1.0 * post) * r_gentle
-        term_manip = w_manip * r_manip
-
-        # Sparse task outcomes
-        term_grasp = w_grasp * grasped
-        term_lift = w_lift * post * r_lift
-
-        # Penalties
-        term_pen_push = -w_pen_push * pen_push
-        term_pen_sweep = -w_pen_sweep * pen_sweep
-        term_pen_fast_down = -w_pen_fast_down * pen_fast_down
-        term_pen_close_early = -w_pen_close_early * pen_close_early
-
+        # ------------------------------------------------------------------
+        # Final reward
+        # ------------------------------------------------------------------
         reward = (
-            term_above
-            + term_xy
-            + term_close
-            + term_ori
-            + term_open
-            + term_pocket
-            + term_desc
-            + term_close_cmd
-            + term_slow
-            + term_gentle
-            + term_manip
-            + term_grasp
-            + term_lift
-            + term_pen_push
-            + term_pen_sweep
-            + term_pen_fast_down
-            + term_pen_close_early
+            2.5 * r_position +
+            1.5 * r_orientation +
+            0.1 * r_manipulability
         )
 
-        reward = _safe(reward).view(-1)
-        assert reward.shape == (n,)
-        assert torch.isfinite(reward).all()
-
-        individual = {
-            "above_pos": _safe(term_above),
-            "xy_align": _safe(term_xy),
-            "close_pos": _safe(term_close),
-            "orientation": _safe(term_ori),
-            "open_gripper": _safe(term_open),
-            "pocket": _safe(term_pocket),
-            "descend_ctrl": _safe(term_desc),
-            "close_gripper_cmd": _safe(term_close_cmd),
-            "slow": _safe(term_slow),
-            "gentle": _safe(term_gentle),
-            "manipulability": _safe(term_manip),
-            "grasp": _safe(term_grasp),
-            "lift": _safe(term_lift),
-            "push_penalty": _safe(term_pen_push),
-            "sweep_penalty": _safe(term_pen_sweep),
-            "fast_down_penalty": _safe(term_pen_fast_down),
-            "close_early_penalty": _safe(term_pen_close_early),
+        individual_rewards = {
+            # "position_tracking": r_position,
+            # "position_bonus": r_pos_bonus,
+            # "orientation_tracking": r_orientation,
+            # "orientation_tracking_raw": r_orientation_raw,
+            # "orientation_gate": orientation_gate,
+            # "orientation_bonus": r_ori_bonus,
+            # "manipulability": r_manipulability,
+            "pos_error": pos_error,
+            "angle_error": angle_error,
         }
-        return reward, individual
 
-
+        return reward, individual_rewards
