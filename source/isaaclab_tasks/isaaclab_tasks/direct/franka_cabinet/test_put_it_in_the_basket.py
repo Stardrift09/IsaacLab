@@ -25,6 +25,7 @@ from torch.utils.tensorboard import SummaryWriter
 # from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.sensors.contact_sensor.contact_sensor import ContactSensor
 from isaaclab.sensors import ContactSensorCfg
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 
 import pdb
 from isaaclab_eureka.utils import eureka_root_dir, read_pkl
@@ -186,7 +187,7 @@ class TestPutItInTheBasketCfg(DirectRLEnvCfg):
         ),
     )
 
-    action_scale = 7.5
+    action_scale = 1.5 # 7.5 originally
     dof_velocity_scale = 0.1
 
     # reward scales
@@ -210,9 +211,14 @@ class TestPutItInTheBasket(DirectRLEnv):
     cfg: TestPutItInTheBasketCfg
 
     def __init__(self, cfg: TestPutItInTheBasketCfg, render_mode: str | None = None, **kwargs):
-    
+        self.debug_vis = True
+        # Only when debug_vis is true:
+        self.show_robot_grasp=True
+        self.show_target_object=False
+        self.show_target_grasp_pose=True
 
-
+        self.log_mine = False
+        self.start_in_air = False
         self.root = eureka_root_dir()
         self.target_object_name = "alphabet_soup"
         self.target_site_name = "basket"
@@ -220,14 +226,20 @@ class TestPutItInTheBasket(DirectRLEnv):
         if self.input_direction != 2:
             raise NotImplementedError("Change the _get_dones method and other calculations for deciding the entry size")
         self.path = f"{self.root}/libero/trajs/libero90/libero_90_living_room_scene1_pick_up_the_{self.target_object_name}_and_put_it_in_the_basket_traj_v2.pkl"
-
+        if self.log_mine:
+            import os
+            log_dir = os.path.join(self.root, "logs", "replay_test")
+            self.summary_writer_mine = SummaryWriter(log_dir)
         start_idx_in_episode_dict = {
             "alphabet_soup":80,
             "cream_cheese":80,
-            "ketchup":80,
+            "ketchup":80, # 80
             "tomato_sauce":90,
         }
-        self.start_idx_in_episode = start_idx_in_episode_dict[self.target_object_name] # for cream_cheese
+        if not self.start_in_air:
+            self.start_idx_in_episode = 0
+        else:
+            self.start_idx_in_episode = start_idx_in_episode_dict[self.target_object_name] # for cream_cheese
         # self.start_idx_in_episode = 80 # For living room scene 1 pick up the alphabet soup
 
         # some calculations to get max episode length from demonstrations
@@ -708,8 +720,8 @@ class TestPutItInTheBasket(DirectRLEnv):
             start_idx_in_episode = self.base[rand_episode_idx]
             rand_int = torch.randint(low=0, high=21, size=(1,), device=self.device).item()
             idx = start_idx_in_episode + rand_int
-            print(idx)
-            print(len(self.data['franka'][rand_episode_idx]["states"]))
+            # print(idx)
+            # print(len(self.data['franka'][rand_episode_idx]["states"]))
             init_states = self.data['franka'][rand_episode_idx]["states"][idx]
             robot_data = init_states['franka'] # seems that joint pos for isaaclab is always positive
             robot_joint_pos = robot_data["dof_pos"]
@@ -718,15 +730,14 @@ class TestPutItInTheBasket(DirectRLEnv):
             # print(f"robot_joint_pos:{robot_joint_pos}")
             robot_joint_pos = {k: v.item() for k, v in robot_joint_pos.items()}
             joint_values = torch.tensor(list(robot_joint_pos.values()), device=self.device)
-            self._robot.data.default_joint_pos[env_ids] = joint_values.unsqueeze(0).repeat(len(env_ids), 1)
-
+            self._robot.data.default_joint_pos[env_ids] = joint_values
             for object_name in self.object_names:
                 object = self.rigid_objects[object_name]
                 pos = torch.tensor(init_states[object_name]["pos"], device=self.device)
                 rot = torch.tensor(init_states[object_name]["rot"], device=self.device)
 
-                object.data.default_root_state[env_ids, 0:3] = pos.unsqueeze(0).repeat(len(env_ids), 1)
-                object.data.default_root_state[env_ids, 3:7] = rot.unsqueeze(0).repeat(len(env_ids), 1)
+                object.data.default_root_state[env_ids, 0:3] = pos
+                object.data.default_root_state[env_ids, 3:7] = rot
 
 
         # robot state
@@ -793,9 +804,9 @@ class TestPutItInTheBasket(DirectRLEnv):
             ),
             dim=-1,
         )
-        print(self.scene["right_contact_sensor"].data.current_contact_time)
-        print(self.scene["right_contact_sensor"].data.force_matrix_w)
-        print(self.scene["right_contact_sensor"].data.force_matrix_w_history.shape)
+        # print(self.scene["right_contact_sensor"].data.current_contact_time)
+        # print(self.scene["right_contact_sensor"].data.force_matrix_w)
+        # print(self.scene["right_contact_sensor"].data.force_matrix_w_history.shape)
         return {"policy": torch.clamp(obs, -5.0, 5.0)}
 
 
