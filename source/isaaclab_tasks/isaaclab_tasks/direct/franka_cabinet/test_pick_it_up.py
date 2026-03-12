@@ -646,31 +646,31 @@ class TestPickItUp(DirectRLEnv):
         self.grasped = self._grasp_detection() # [num_envs, 1]
 
 
-        # condition for termination: for dropping the object in the basket
-        site_height = self.target_site_corners_world[1,2] - self.target_site_corners_world[0,2]
-        low_enough = self.target_object.data.root_pos_w[:, 2] <site_height # change the harded coded height
-        obj_xy = self.target_object.data.root_pos_w[:, :2]
-        site_pos = self.target_site.data.root_pos_w[:, :2]
-        dist2 = ((obj_xy - site_pos)**2).sum(dim=-1)
-        inside_site = dist2 < self.target_site_radius**2
-        terminated = inside_site & low_enough
+        # # condition for termination: for dropping the object in the basket
+        # site_height = self.target_site_corners_world[1,2] - self.target_site_corners_world[0,2]
+        # low_enough = self.target_object.data.root_pos_w[:, 2] <site_height # change the harded coded height
+        # obj_xy = self.target_object.data.root_pos_w[:, :2]
+        # site_pos = self.target_site.data.root_pos_w[:, :2]
+        # dist2 = ((obj_xy - site_pos)**2).sum(dim=-1)
+        # inside_site = dist2 < self.target_site_radius**2
+        # terminated = inside_site & low_enough
 
 
-        # # condition for picking up the object
-        # object_default_state = self.target_object.data.default_root_state.clone()
-        # high_enough = self.target_object.data.root_pos_w[:, 2] > object_default_state[:,self.input_direction] + 0.1
-        # # quaternions are (w, x, y, z)
-        # target_object_current_pose = self.target_object.data.root_quat_w        # shape (N, 4)
-        # target_object_desired_pose = object_default_state[:,3:7]         # shape (N, 4)
-        # # inverse of current
-        # target_object_current_pose_inv = quat_conjugate(target_object_current_pose)
-        # # relative rotation
-        # q_error = quat_mul(target_object_desired_pose, target_object_current_pose_inv)
-        # q_error = q_error / torch.norm(q_error, dim=-1, keepdim=True).clamp_min(1e-9)
-        # q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
-        # angle_error = 2 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
-        # small_rotation = angle_error < 0.8
-        # terminated = high_enough & self.grasped.bool().squeeze() & small_rotation
+        # condition for picking up the object
+        object_default_state = self.target_object.data.default_root_state.clone()
+        high_enough = self.target_object.data.root_pos_w[:, 2] > object_default_state[:,self.input_direction] + 0.1
+        # quaternions are (w, x, y, z)
+        target_object_current_pose = self.target_object.data.root_quat_w        # shape (N, 4)
+        target_object_desired_pose = object_default_state[:,3:7]         # shape (N, 4)
+        # inverse of current
+        target_object_current_pose_inv = quat_conjugate(target_object_current_pose)
+        # relative rotation
+        q_error = quat_mul(target_object_desired_pose, target_object_current_pose_inv)
+        q_error = q_error / torch.norm(q_error, dim=-1, keepdim=True).clamp_min(1e-9)
+        q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
+        angle_error = 2 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
+        small_rotation = angle_error < 0.8
+        terminated = high_enough & self.grasped.bool().squeeze() & small_rotation
 
 
 
@@ -739,7 +739,7 @@ class TestPickItUp(DirectRLEnv):
     def _reset_idx(self, env_ids: torch.Tensor | None):
         super()._reset_idx(env_ids)
         self.update_rate += 1
-        if self.update_rate%10 == 0:
+        if self.update_rate%2 == 0:
         # update default root states for random initialization
             rand_episode_idx = torch.randint(low=0, high=50, size=(1,), device=self.device).item()
             if self.start_in_air:
