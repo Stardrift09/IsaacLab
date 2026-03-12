@@ -16,7 +16,8 @@ from . import agents
 
 task_dict = { # Using the same config, manually set
     "TestStageAsFeedback": "test_stage_as_feedback",
-    "TestPickItUp": "test_pick_it_up"
+    "TestPickItUp": "test_pick_it_up",
+    "ControlTargetPosManually": "control_target_pos_manually",
 }
 for k, v in task_dict.items():
     gym.register(
