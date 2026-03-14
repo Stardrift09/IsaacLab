@@ -658,7 +658,7 @@ class TestPickItUp(DirectRLEnv):
 
         # condition for picking up the object
         object_default_state = self.target_object.data.default_root_state.clone()
-        high_enough = self.target_object.data.root_pos_w[:, 2] > object_default_state[:,self.input_direction] + 0.1
+        self.high_enough = self.target_object.data.root_pos_w[:, 2] > object_default_state[:,self.input_direction] + 0.1
         # quaternions are (w, x, y, z)
         target_object_current_pose = self.target_object.data.root_quat_w        # shape (N, 4)
         target_object_desired_pose = object_default_state[:,3:7]         # shape (N, 4)
@@ -669,10 +669,8 @@ class TestPickItUp(DirectRLEnv):
         q_error = q_error / torch.norm(q_error, dim=-1, keepdim=True).clamp_min(1e-9)
         q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
         angle_error = 2 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
-        small_rotation = angle_error < 0.8
-        terminated = high_enough & self.grasped.bool().squeeze() & small_rotation
-
-
+        self.small_rotation = angle_error < 0.8
+        terminated = self.high_enough & self.grasped.bool().squeeze() & self.small_rotation # make them attributes for reuse in stage detection
 
         # print(f"small_rotation{small_rotation}")
         # print(f"high_enough{high_enough}")
@@ -684,29 +682,10 @@ class TestPickItUp(DirectRLEnv):
         # ratio = terminated_count / (truncated_count + 1e-8)
         # print(ratio)
 
+        self.stage = self._current_stage_detection()
 
         if self.debug_vis:
-            translations_list = [
-                x for flag, x in [
-                    (self.show_robot_grasp, self.robot_grasp_pos),
-                    (self.show_target_object, self.target_object.data.root_pos_w),
-                    (self.show_target_grasp_pose, self.target_object.data.root_pos_w),
-                ] if flag
-            ]
-            translations = torch.cat(translations_list, dim=0) if translations_list else None
-            
-            orientations_list = [
-                x for flag, x in [
-                    (self.show_robot_grasp, self.robot_grasp_rot),
-                    (self.show_target_object, self.target_object.data.root_quat_w),
-                    (self.show_target_grasp_pose, self.q_rel),
-                ] if flag
-            ]
-            orientations = torch.cat(orientations_list, dim=0) if orientations_list else None
-
-            self.visualizer.visualize(translations=translations,
-                                    orientations=orientations,
-                                    )
+            self.debug_vis_mine()
 
         if self.log_mine:
             for i in range(20):
@@ -728,6 +707,7 @@ class TestPickItUp(DirectRLEnv):
                 #     self._sim_step_counter
                 # )
 
+        
         return terminated, truncated
     
     def _get_rewards(self) -> torch.Tensor:
@@ -791,8 +771,10 @@ class TestPickItUp(DirectRLEnv):
         self._compute_intermediate_values(env_ids=env_ids)
         q_rel = self.q_rel[env_ids]
         self.to_desired_rot[env_ids] = quat_mul(quat_conjugate(self.robot_grasp_rot[env_ids]), q_rel)
-        self.helper_variable[env_ids] = torch.zeros((len(env_ids), 10), device=self.device)
-        self.grasped[env_ids] = torch.zeros((len(env_ids), 1), device=self.device).bool() # stop updating with grasp detection cause no physics simulation
+        self.helper_variable[env_ids].zero_()
+        self.grasped[env_ids].fill_(False) # stop updating with grasp detection cause no physics simulation
+        self.stage[env_ids].zero_()
+
 
     def _get_observations(self) -> dict:
         """
@@ -804,7 +786,11 @@ class TestPickItUp(DirectRLEnv):
         self.to_desired_rot, # the quaterion that goes from current to desired quat, apply reward on this: specifically high reward for the first element w to be 1!!!
         self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
         self.target_site_corners_world # you can read the three dim from the [2, 3] tensor storing min(first row) and max corner of the site in local env frame
-        self.grasped # [self.num_envs, 1] True means two fingers have contact force against object and self.target_to_hand_pos is consistently small
+        self.stage: [self.num_envs, 1]
+            stage 0: beginning of the task
+            stage 1: Object is grasped and relative distance has been small for 10 steps
+            stage 2: Object is lifted up to be higher than target site.
+            stage 3: Object is right above the target site and ready to be dropped.
         """
 
 
@@ -831,7 +817,7 @@ class TestPickItUp(DirectRLEnv):
                 self.site_to_target_pos, # relative position from target site to target object
                 target_to_hand_vel,
                 site_to_target_vel,
-                self.grasped.float() , # 1 or 0, indicating whether two force sensors on fingers have contact force.
+                self.stage,
             ),
             dim=-1,
         )
@@ -1208,6 +1194,7 @@ class TestPickItUp(DirectRLEnv):
         grasped_right = (right_force > 0).any(dim=(1, 2)).unsqueeze(1)  # (N,)
         grasped = grasped_left & grasped_right & always_small
         if self.log_mine:
+            small = self.past_relative_dist[env_ids, 0] < threshold
             print(self._sim_step_counter)
             for i in range(20):
                 self.summary_writer_mine.add_scalars(
@@ -1216,6 +1203,7 @@ class TestPickItUp(DirectRLEnv):
                         "grasped": grasped[i].item(),
                         "grasped_left": grasped_left[i].item(),
                         "always_small": always_small[i].item(),
+                        "small": small[i].item(),
                     },
                     self._sim_step_counter
                 )
@@ -1243,12 +1231,16 @@ class TestPickItUp(DirectRLEnv):
     def _current_stage_detection(self, env_ids: torch.Tensor | None = None):
         if env_ids is None:
             env_ids = self._robot._ALL_INDICES
+        
         grasped = self._grasp_detection(env_ids=env_ids).squeeze(1)          # bool tensor
+        small_rotation = self.small_rotation[env_ids] # remove for now for easier task
+        threshold = 0.1
+        # small_movement_from_original_position = self.target_object.data.default_root_state[env_ids, 0:3] < self.past_relative_dist[env_ids, 0] < threshold
         object_lowest_point = self._get_target_object_lowest_points(env_ids=env_ids)
         site_height = self.target_site_corners_world[1,2] - self.target_site_corners_world[0,2]      # tensor (meters)
         inside_site = self._get_inside_site(env_ids=env_ids)          # bool tensor
 
-        # Stage 1
+        # Stage 1: cautious grasp
         stage = grasped.float()
 
         # Stage 2: grasped AND height > 0.10 m
@@ -1265,7 +1257,7 @@ class TestPickItUp(DirectRLEnv):
             torch.full_like(stage, 3.0),
             stage
         )
-        return stage # [self.num_envs, 1]
+        return stage.unsqueeze(1) # [self.num_envs, 1]
 
 
     def define_markers(self) -> VisualizationMarkers:
@@ -1280,6 +1272,28 @@ class TestPickItUp(DirectRLEnv):
             },
         )
         return VisualizationMarkers(marker_cfg)
+
+    def debug_vis_mine(self):
+        translations_list = [
+            x for flag, x in [
+                (self.show_robot_grasp, self.robot_grasp_pos),
+                (self.show_target_object, self.target_object.data.root_pos_w),
+                (self.show_target_grasp_pose, self.target_object.data.root_pos_w),
+            ] if flag
+        ]
+        translations = torch.cat(translations_list, dim=0) if translations_list else None
+        
+        orientations_list = [
+            x for flag, x in [
+                (self.show_robot_grasp, self.robot_grasp_rot),
+                (self.show_target_object, self.target_object.data.root_quat_w),
+                (self.show_target_grasp_pose, self.q_rel),
+            ] if flag
+        ]
+        orientations = torch.cat(orientations_list, dim=0) if orientations_list else None
+        self.visualizer.visualize(translations=translations,
+                                orientations=orientations,
+                                )
 
 
     def _get_rewards_test_manipulability(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
