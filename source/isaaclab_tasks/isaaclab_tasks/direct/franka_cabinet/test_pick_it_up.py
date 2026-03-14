@@ -35,7 +35,7 @@ class TestPickItUpCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 8.65  # 519 timesteps
     decimation = 2
-    action_space = 9
+    action_space = 8
     observation_space = 25 # to modify
     state_space = 0
 
@@ -253,7 +253,7 @@ class TestPickItUp(DirectRLEnv):
         cfg.episode_length_s = episode_length * cfg.sim.dt * cfg.decimation # handling this dynamically
         
         # pdb.set_trace()
-
+        self.history_len = 10
 
         self.debug = False  
         super().__init__(cfg, render_mode, **kwargs)
@@ -411,7 +411,7 @@ class TestPickItUp(DirectRLEnv):
         # half extents
         obj_half = 0.5 * obj_xy_extent
         site_half = 0.5 * site_xy_extent
-        self.target_site_radius = site_half - obj_half
+        self.target_site_radius = site_half - obj_half - 0.02
         if self.target_site_radius.item() < 0:
             self.target_site_radius = torch.tensor(0.02)
 
@@ -461,8 +461,9 @@ class TestPickItUp(DirectRLEnv):
         self.manipulability = torch.zeros((self.num_envs), device=self.device)
         self.to_desired_rot = torch.zeros((self.num_envs, 4), device=self.device)
         self.q_rel = torch.tensor([-0.0238,  0.9797, -0.1958,  0.0350], device=self.device).repeat(self.num_envs, 1)
-        self.past_relative_dist = torch.ones((self.num_envs,10), device=self.device)
-        self.grasped = torch.zeros((self.num_envs, 1), device=self.device, dtype=bool)
+        self.past_relative_dist = torch.ones((self.num_envs, self.history_len), device=self.device)
+        self.grasped = torch.zeros((self.num_envs), device=self.device, dtype=bool)
+        self.stage = torch.zeros((self.num_envs), device=self.device, dtype=bool)
 
         # # Specific to in the air task, randomize the initialization
         self.update_rate = 0
@@ -597,12 +598,23 @@ class TestPickItUp(DirectRLEnv):
             self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
 
         left_contact_sensor_cfg = ContactSensorCfg(
-            prim_path="/World/envs/env_.*/Robot/panda_leftfinger", update_period=0.0, history_length=10, 
-            track_air_time=True, filter_prim_paths_expr=[f"/World/envs/env_.*/{self.target_object_name}/object"],
+            prim_path="/World/envs/env_.*/Robot/panda_leftfinger", 
+            update_period=0.0,
+            history_length=2*self.history_len,
+            track_air_time=True,
+            filter_prim_paths_expr=[f"/World/envs/env_.*/{self.target_object_name}/object"],
+            track_contact_points=True,
+            max_contact_data_count_per_prim=4, # What is this
         )
         right_contact_sensor_cfg = ContactSensorCfg(
-            prim_path="/World/envs/env_.*/Robot/panda_rightfinger", update_period=0.0, history_length=10, 
-            track_air_time=True, filter_prim_paths_expr=[f"/World/envs/env_.*/{self.target_object_name}/object"],
+            prim_path="/World/envs/env_.*/Robot/panda_rightfinger", 
+            update_period=0.0,
+            history_length=2*self.history_len, 
+            track_air_time=True,
+            filter_prim_paths_expr=[f"/World/envs/env_.*/{self.target_object_name}/object"],
+            track_contact_points=True,
+            max_contact_data_count_per_prim=4,
+
         )
         # left_contact_sensor_cfg = ContactSensorCfg(
         #     prim_path="/World/envs/env_.*/Robot/panda_leftfinger", update_period=0.0, history_length=10,
@@ -628,7 +640,9 @@ class TestPickItUp(DirectRLEnv):
     # pre-physics step calls
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        actions = torch.cat([actions,actions[:,-1].unsqueeze(1)], dim=1) # duplicate the gripper motion
         self.actions = actions.clone().clamp(-1.0, 1.0)
+        
         targets = self.robot_dof_targets + self.robot_dof_speed_scales * self.dt * self.actions * self.cfg.action_scale
         self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
 
@@ -643,34 +657,37 @@ class TestPickItUp(DirectRLEnv):
         self._compute_intermediate_values()
         self.to_desired_rot = quat_mul(quat_conjugate(self.robot_grasp_rot), self.q_rel)
         self.manipulability = self._compute_manipulability()
-        self.grasped = self._grasp_detection() # [num_envs, 1]
+        self.grasped = self._grasp_detection() # [num_envs]
+        self._update_past_relative_dist()
 
 
-        # # condition for termination: for dropping the object in the basket
-        # site_height = self.target_site_corners_world[1,2] - self.target_site_corners_world[0,2]
-        # low_enough = self.target_object.data.root_pos_w[:, 2] <site_height # change the harded coded height
-        # obj_xy = self.target_object.data.root_pos_w[:, :2]
-        # site_pos = self.target_site.data.root_pos_w[:, :2]
-        # dist2 = ((obj_xy - site_pos)**2).sum(dim=-1)
-        # inside_site = dist2 < self.target_site_radius**2
+        object_lowest_point = self._get_target_object_lowest_points()
+
+        # condition for termination: for dropping the object in the basket
+        site_height = self.target_site_corners_world[1,2] - self.target_site_corners_world[0,2]
+        self.low_enough = self.target_object.data.root_pos_w[:, 2] <site_height # change the harded coded height
+        obj_xy = self.target_object.data.root_pos_w[:, :2]
+        site_pos = self.target_site.data.root_pos_w[:, :2]
+        dist2 = ((obj_xy - site_pos)**2).sum(dim=-1)
+        self.inside_site = dist2 < self.target_site_radius**2
         # terminated = inside_site & low_enough
-
+        self.high_enough = object_lowest_point > site_height + 0.05
 
         # condition for picking up the object
-        object_default_state = self.target_object.data.default_root_state.clone()
-        self.high_enough = self.target_object.data.root_pos_w[:, 2] > object_default_state[:,self.input_direction] + 0.1
-        # quaternions are (w, x, y, z)
-        target_object_current_pose = self.target_object.data.root_quat_w        # shape (N, 4)
-        target_object_desired_pose = object_default_state[:,3:7]         # shape (N, 4)
-        # inverse of current
-        target_object_current_pose_inv = quat_conjugate(target_object_current_pose)
-        # relative rotation
-        q_error = quat_mul(target_object_desired_pose, target_object_current_pose_inv)
-        q_error = q_error / torch.norm(q_error, dim=-1, keepdim=True).clamp_min(1e-9)
-        q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
-        angle_error = 2 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
-        self.small_rotation = angle_error < 0.8
-        terminated = self.high_enough & self.grasped.bool().squeeze() & self.small_rotation # make them attributes for reuse in stage detection
+
+        # # quaternions are (w, x, y, z)
+        # target_object_current_pose = self.target_object.data.root_quat_w        # shape (N, 4)
+        # target_object_desired_pose = object_default_state[:,3:7]         # shape (N, 4)
+        # # inverse of current
+        # target_object_current_pose_inv = quat_conjugate(target_object_current_pose)
+        # # relative rotation
+        # q_error = quat_mul(target_object_desired_pose, target_object_current_pose_inv)
+        # q_error = q_error / torch.norm(q_error, dim=-1, keepdim=True).clamp_min(1e-9)
+        # q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
+        # angle_error = 2 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
+        # self.small_rotation = angle_error < 0.8
+
+        terminated = self.inside_site & self.low_enough
 
         # print(f"small_rotation{small_rotation}")
         # print(f"high_enough{high_enough}")
@@ -690,7 +707,7 @@ class TestPickItUp(DirectRLEnv):
         if self.log_mine:
             for i in range(20):
                 pass
-                target_object_current_pose = self.target_object.data.root_quat_w        # shape (N, 4)
+                # target_object_current_pose = self.target_object.data.root_quat_w        # shape (N, 4)
                 # target_object_desired_pose = object_default_state[:,3:7]         # shape (N, 4) 
                 # # inverse of current
                 # target_object_current_pose_inv = quat_conjugate(target_object_current_pose)
@@ -712,6 +729,11 @@ class TestPickItUp(DirectRLEnv):
     
     def _get_rewards(self) -> torch.Tensor:
         rewards, individual_rewards = self._get_rewards_test()
+        if self.log_mine:
+            for k,v in individual_rewards.items():
+                for i in range(20):
+                    self.summary_writer_mine.add_scalar(k, v[i].item(), self._sim_step_counter) 
+
         self.extras["log"] = individual_rewards
         return rewards
 
@@ -774,7 +796,7 @@ class TestPickItUp(DirectRLEnv):
         self.helper_variable[env_ids].zero_()
         self.grasped[env_ids].fill_(False) # stop updating with grasp detection cause no physics simulation
         self.stage[env_ids].zero_()
-
+        self.past_relative_dist[env_ids].zero_()
 
     def _get_observations(self) -> dict:
         """
@@ -786,11 +808,12 @@ class TestPickItUp(DirectRLEnv):
         self.to_desired_rot, # the quaterion that goes from current to desired quat, apply reward on this: specifically high reward for the first element w to be 1!!!
         self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
         self.target_site_corners_world # you can read the three dim from the [2, 3] tensor storing min(first row) and max corner of the site in local env frame
-        self.stage: [self.num_envs, 1]
+        self.stage=self._current_stage_detection # [self.num_envs]
             stage 0: beginning of the task
             stage 1: Object is grasped and relative distance has been small for 10 steps
             stage 2: Object is lifted up to be higher than target site.
             stage 3: Object is right above the target site and ready to be dropped.
+        )
         """
 
 
@@ -800,7 +823,7 @@ class TestPickItUp(DirectRLEnv):
             / (self.robot_dof_upper_limits - self.robot_dof_lower_limits)
             - 1.0
         )
-        self.corners_target_obj_to_hand_pos =  (self.corners_target_obj - self.robot_grasp_pos.unsqueeze(1)).reshape(self.num_envs, -1) # corners to robot dist described in world coordinate.
+        self.corners_target_obj_to_hand_pos =  (self.corners_target_obj - self.robot_grasp_pos.unsqueeze(1)).reshape(self.num_envs, -1) # distance from corners of target objects to robot, described in world coordinate.
         self.target_to_hand_pos = self.target_object.data.root_pos_w - self.robot_grasp_pos # [self.num_envs, 3]
         tcp_vel = (self._robot.data.body_link_lin_vel_w[:,self.left_finger_body_idx] + self._robot.data.body_link_lin_vel_w[:,self.right_finger_body_idx])/2
         target_to_hand_vel = self.target_object.data.root_lin_vel_w - tcp_vel
@@ -817,10 +840,11 @@ class TestPickItUp(DirectRLEnv):
                 self.site_to_target_pos, # relative position from target site to target object
                 target_to_hand_vel,
                 site_to_target_vel,
-                self.stage,
+                self.stage.unsqueeze(1),
             ),
             dim=-1,
         )
+
         return {"policy": torch.clamp(obs, -5.0, 5.0)}
 
 
@@ -1037,31 +1061,42 @@ class TestPickItUp(DirectRLEnv):
                
                 if detect_grasp:
                     # update self.robot_grasp_pos
-                    _,_ = self._get_dones()
-                    _ = self._get_observations()
+                    # _,_ = self._get_dones()
+                    # _ = self._get_observations()
                     # for i in range(50):
                     #     writer.add_scalar("Grasp/"+str(i), self.grasped[i], t) 
                     diff = self.target_object.data.body_pos_w.squeeze(1) - self.robot_grasp_pos
                     # print(diff[0]) # play the first episode to check the constant object-hand distance
                     diff_norm = torch.norm(diff, dim=-1)  # shape: (n,)
                     # 0.09 ketchup/ 0.03 cream_cheese 0.1 alphabet_soup
-                    
+                    # stable_left_contact, stable_right_contact, stable_opposing_contact, always_small = self._grasp_detection()
+                    # for k in range(50):
+                    #     writer.add_scalars("grasp/"+str(k), 
+                    #                     {
+                    #                     "stable_left_contact": stable_left_contact[k], 
+                    #                     "stable_right_contact": stable_right_contact[k], 
+                    #                     "stable_opposing_contact": stable_opposing_contact[k], 
+                    #                     "always_small": always_small[k], },
+                    #                     t)
+
                     if t > 20:
                         obj_z = self.target_object.data.root_pos_w[env_ids, 2]  # (num_envs,)
                         in_air = obj_z > 0.1                              # (num_envs,) bool
                         new_air_envs = torch.nonzero(in_air & (in_the_air_matrix == -1), as_tuple=False).squeeze(-1)
                         in_the_air_matrix[new_air_envs] = t
 
-                    if self.target_object.data.root_pos_w[0,2] > 0.1: # check if the grasp is stable (object-hand distance is small) and the object is lifted up (z is large), which should happen at the end of episode when the agent learns to lift up the object while keeping a stable grasp
-                        print("logging")
-                        for k in range(50):
-                            writer.add_scalars("Position_error/"+str(k), 
-                                            {"x": diff[k,0], 
-                                            "y": diff[k,1], 
-                                            "z": diff[k,2], },
-                                            t)
-                        # print(f"timestep {t}: object in the air")
-                        print(self.robot_grasp_rot[0])
+
+
+                    # if self.target_object.data.root_pos_w[0,2] > 0.1: # check if the grasp is stable (object-hand distance is small) and the object is lifted up (z is large), which should happen at the end of episode when the agent learns to lift up the object while keeping a stable grasp
+                    #     print("logging")
+                    #     for k in range(50):
+                    #         writer.add_scalars("Position_error/"+str(k), 
+                    #                         {"x": diff[k,0], 
+                    #                         "y": diff[k,1], 
+                    #                         "z": diff[k,2], },
+                    #                         t)
+                    #     # print(f"timestep {t}: object in the air")
+                    #     print(self.robot_grasp_rot[0])
 
                         
                     # print(diff_norm[0]) # should be small and constant if the grasp is stable, which is the case for most of the episode, except at the end when the object is lifted up and the grasp is broken. This matches with the observation that the agent learns to keep a stable grasp and lift up the object at the end of training.
@@ -1134,7 +1169,7 @@ class TestPickItUp(DirectRLEnv):
             env_ids = self._robot._ALL_INDICES
         self._compute_robot_intermediate_values(env_ids)
         self._compute_target_object_corners(env_ids)
-        self._update_past_relative_dist(env_ids)
+        
         # self._compute_manipulability(env_ids) # This is only needed for reward computatoin
 
 
@@ -1185,38 +1220,82 @@ class TestPickItUp(DirectRLEnv):
     def _grasp_detection(self, env_ids: torch.Tensor | None = None):
         if env_ids is None:
             env_ids = self._robot._ALL_INDICES
-        # threshold = torch.max(self.target_object_size)/2.0 # TODO: This doesn't apply when the gripper is big, reconsider
-        threshold = 0.05
-        always_small = torch.all(self.past_relative_dist[env_ids] < threshold, dim=1).unsqueeze(1)
-        left_force = torch.norm(self.scene["left_contact_sensor"].data.force_matrix_w[env_ids], dim=-1)
-        grasped_left = (left_force > 0).any(dim=(1, 2)).unsqueeze(1)  # (N,) # TODO: use squeeze first?
-        right_force = torch.norm(self.scene["right_contact_sensor"].data.force_matrix_w[env_ids], dim=-1)
-        grasped_right = (right_force > 0).any(dim=(1, 2)).unsqueeze(1)  # (N,)
-        grasped = grasped_left & grasped_right & always_small
-        if self.log_mine:
-            small = self.past_relative_dist[env_ids, 0] < threshold
-            print(self._sim_step_counter)
-            for i in range(20):
-                self.summary_writer_mine.add_scalars(
-                    f"Grasp/env_{i}",
-                    {
-                        "grasped": grasped[i].item(),
-                        "grasped_left": grasped_left[i].item(),
-                        "always_small": always_small[i].item(),
-                        "small": small[i].item(),
-                    },
-                    self._sim_step_counter
-                )
+
+        # Distance must remain small over the full history window
+        threshold = 0.02
+        always_small = torch.all(self.past_relative_dist[env_ids] < threshold, dim=1)
+
+        left_forces_hist = self.scene["left_contact_sensor"].data.force_matrix_w_history[env_ids]
+        right_forces_hist = self.scene["right_contact_sensor"].data.force_matrix_w_history[env_ids]
+
+        # Force magnitudes
+        left_force_mag = torch.linalg.norm(left_forces_hist, dim=-1)
+        right_force_mag = torch.linalg.norm(right_forces_hist, dim=-1)
+
+        # Contact existence per history/body/contact slot
+        left_contact = left_force_mag > 0
+        right_contact = right_force_mag > 0
+
+        # Require contact to be present at every past step / slot for both sides
+        stable_left_contact = torch.all(left_contact, dim=tuple(range(1, left_contact.ndim)))
+        stable_right_contact = torch.all(right_contact, dim=tuple(range(1, right_contact.ndim)))
+
+        # Normalize safely
+        eps = 1e-8
+        left_dir = left_forces_hist / (left_force_mag.unsqueeze(-1) + eps)
+        right_dir = right_forces_hist / (right_force_mag.unsqueeze(-1) + eps)
+
+        # Dot product < 0 means opposing directions
+        dir_dot = torch.sum(left_dir * right_dir, dim=-1)
+
+        # Only valid where both sides actually have contact
+        mutual_contact = left_contact & right_contact
+
+        # Require all past contacts to be opposing / pointing toward each other
+        # You can tighten threshold to e.g. dir_dot < -0.3 if needed
+        opposing_contact = mutual_contact & (dir_dot < 0.0)
+
+        # For a valid grasp, every historical contact entry must be stable and opposing
+        stable_opposing_contact = torch.all(
+            opposing_contact, dim=tuple(range(1, opposing_contact.ndim))
+        )
+
+        grasped = (
+            stable_left_contact
+            & stable_right_contact
+            & stable_opposing_contact
+            & always_small
+        )
+
         return grasped
+
+
+
+        # if self.log_mine:
+        #     small = self.past_relative_dist[env_ids, 0] < threshold
+        #     for i in range(self.num_envs):
+        #         self.summary_writer_mine.add_scalars(
+        #             f"Grasp/env_{i}",
+        #             {
+        #                 "grasped": grasped[i].item(),
+        #                 "grasped_left": grasped_left[i].item(),
+        #                 "always_small": always_small[i].item(),
+        #                 "small": small[i].item(),
+        #             },
+        #             self._sim_step_counter
+        #         )
+        return grasped # 1D
    
 
-    def _get_target_object_lowest_points(self, env_ids: torch.Tensor):
+    def _get_target_object_lowest_points(self, env_ids: torch.Tensor | None = None):
+        if env_ids is None:
+            env_ids = self._robot._ALL_INDICES
         # shape: (N, num_corners, 3)
         corners = self.corners_target_obj[env_ids]
         # Extract z coordinates
         z_coords = corners[..., 2]
         # Get minimum z per environment
-        lowest_z, _ = torch.min(z_coords, dim=1)
+        lowest_z, _ = torch.min(z_coords, dim=1) # num_corners
         return lowest_z
     
 
@@ -1232,32 +1311,39 @@ class TestPickItUp(DirectRLEnv):
         if env_ids is None:
             env_ids = self._robot._ALL_INDICES
         
-        grasped = self._grasp_detection(env_ids=env_ids).squeeze(1)          # bool tensor
-        small_rotation = self.small_rotation[env_ids] # remove for now for easier task
-        threshold = 0.1
-        # small_movement_from_original_position = self.target_object.data.default_root_state[env_ids, 0:3] < self.past_relative_dist[env_ids, 0] < threshold
-        object_lowest_point = self._get_target_object_lowest_points(env_ids=env_ids)
-        site_height = self.target_site_corners_world[1,2] - self.target_site_corners_world[0,2]      # tensor (meters)
-        inside_site = self._get_inside_site(env_ids=env_ids)          # bool tensor
 
         # Stage 1: cautious grasp
-        stage = grasped.float()
+        stage = self.grasped.float()
 
         # Stage 2: grasped AND height > 0.10 m
         
         stage = torch.where(
-            grasped & (object_lowest_point > site_height),
+            self.grasped & self.high_enough,
             torch.full_like(stage, 2.0),
             stage
         )
 
-        # Stage 3: grasped AND inside_site
+        # Stage 3: grasped AND inside_site in x y direction
         stage = torch.where(
-            grasped & inside_site,
+            self.grasped & self.inside_site & self.high_enough,
             torch.full_like(stage, 3.0),
             stage
         )
-        return stage.unsqueeze(1) # [self.num_envs, 1]
+        
+        if self.log_mine:
+            for i in range(20):
+                self.summary_writer_mine.add_scalars(
+                    f"r_lift_progress/env_{i}",
+                    {
+                        "grasped": self.grasped.float()[i].item(),
+                        "stage": stage[i].item(),
+                        "inside_site": self.inside_site.float()[i].item(),
+                        "self.high_enough": self.high_enough.float()[i].item(),
+                    },
+                    self._sim_step_counter
+                )
+
+        return stage # [self.num_envs]
 
 
     def define_markers(self) -> VisualizationMarkers:
@@ -1383,285 +1469,193 @@ class TestPickItUp(DirectRLEnv):
 
 
 
+
+
     def _get_rewards_test(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         import torch
 
-        eps = 1e-6
         device = self.device
 
-        # ------------------------------------------------------------------
-        # Sanitize environment tensors
-        # ------------------------------------------------------------------
-        robot_grasp_pos = torch.nan_to_num(self.robot_grasp_pos)
-        target_pos = torch.nan_to_num(self.target_object.data.root_pos_w)
-        target_vel = torch.nan_to_num(self.target_object.data.root_lin_vel_w)
-        target_quat = torch.nan_to_num(self.target_object.data.root_quat_w)
-        default_root_state = torch.nan_to_num(self.target_object.data.default_root_state)
-        desired_quat = torch.nan_to_num(default_root_state[:, 3:7])
+        # -----------------------------
+        # Sanitize commonly used states
+        # -----------------------------
+        target_pos = torch.nan_to_num(self.target_object.data.root_pos_w, nan=0.0, posinf=0.0, neginf=0.0)
+        site_pos = torch.nan_to_num(self.target_site.data.root_pos_w, nan=0.0, posinf=0.0, neginf=0.0)
+        grasp_pos = torch.nan_to_num(self.robot_grasp_pos, nan=0.0, posinf=0.0, neginf=0.0)
+        target_to_hand = torch.nan_to_num(self.target_to_hand_pos, nan=0.0, posinf=0.0, neginf=0.0)
+        site_to_target = torch.nan_to_num(self.site_to_target_pos, nan=0.0, posinf=0.0, neginf=0.0)
+        corners_target_obj_to_hand = torch.nan_to_num(self.corners_target_obj_to_hand_pos, nan=0.0, posinf=0.0, neginf=0.0)
+        to_desired_rot = torch.nan_to_num(self.to_desired_rot, nan=0.0, posinf=0.0, neginf=0.0)
+        stage = torch.nan_to_num(self.stage.float(), nan=0.0, posinf=0.0, neginf=0.0)
 
-        target_to_hand_pos = torch.nan_to_num(self.target_to_hand_pos)
-        manipulability = torch.nan_to_num(self.manipulability).clamp(min=0.0)
-        grasped = torch.nan_to_num(self.grasped.float().squeeze(-1)).clamp(0.0, 1.0)
+        # Velocities for smoothness / drop detection
+        obj_lin_vel = torch.nan_to_num(self.target_object.data.root_lin_vel_w, nan=0.0, posinf=0.0, neginf=0.0)
+        site_lin_vel = torch.nan_to_num(self.target_site.data.root_lin_vel_w, nan=0.0, posinf=0.0, neginf=0.0)
+        tcp_vel = (
+            torch.nan_to_num(self._robot.data.body_link_lin_vel_w[:, self.left_finger_body_idx], nan=0.0, posinf=0.0, neginf=0.0)
+            + torch.nan_to_num(self._robot.data.body_link_lin_vel_w[:, self.right_finger_body_idx], nan=0.0, posinf=0.0, neginf=0.0)
+        ) * 0.5
+        rel_vel = torch.nan_to_num(obj_lin_vel - tcp_vel, nan=0.0, posinf=0.0, neginf=0.0)
+        site_to_target_vel = torch.nan_to_num(obj_lin_vel - site_lin_vel, nan=0.0, posinf=0.0, neginf=0.0)
 
-        joint_pos = torch.nan_to_num(self._robot.data.joint_pos)
-        joint_vel = torch.nan_to_num(self._robot.data.joint_vel)
-        body_lin_vel = torch.nan_to_num(self._robot.data.body_link_lin_vel_w)
-        left_finger_vel = body_lin_vel[:, self.left_finger_body_idx]
-        right_finger_vel = body_lin_vel[:, self.right_finger_body_idx]
-        tcp_vel = 0.5 * (left_finger_vel + right_finger_vel)
-
-        corners_flat = torch.nan_to_num(self.corners_target_obj_to_hand_pos)
-        corners = corners_flat.view(self.num_envs, -1, 3)
-        corner_dists = torch.linalg.norm(corners, dim=-1)
-        min_corner_dist = torch.nan_to_num(corner_dists.min(dim=-1).values)
-
-        to_desired_rot = torch.nan_to_num(self.to_desired_rot)
-
-        # ------------------------------------------------------------------
-        # Derived geometry
-        # self.target_to_hand_pos = object_center - tcp
-        # ------------------------------------------------------------------
-        dist_3d = torch.linalg.norm(target_to_hand_pos, dim=-1)
-        dist_xy = torch.linalg.norm(target_to_hand_pos[:, :2], dim=-1)
-        z_rel = robot_grasp_pos[:, 2] - target_pos[:, 2]  # tcp_z - obj_z
-
-        pregrasp_height = 0.10
-        pregrasp_target = target_pos + torch.tensor([0.0, 0.0, pregrasp_height], device=device).unsqueeze(0)
-        pregrasp_dist = torch.linalg.norm(robot_grasp_pos - pregrasp_target, dim=-1)
-
-        tcp_speed = torch.linalg.norm(tcp_vel, dim=-1)
-        tcp_xy_speed = torch.linalg.norm(tcp_vel[:, :2], dim=-1)
-        tcp_down_speed = (-tcp_vel[:, 2]).clamp(min=0.0)
-        obj_speed = torch.linalg.norm(target_vel, dim=-1)
-        joint_speed = torch.linalg.norm(joint_vel, dim=-1)
-
-        finger_pos = joint_pos[:, -2:]
-        gripper_opening = torch.nan_to_num(finger_pos.sum(dim=-1))
-
-        # ------------------------------------------------------------------
-        # Orientation error
-        # ------------------------------------------------------------------
-        rot_w = torch.clamp(to_desired_rot[:, 0], -1.0, 1.0)
-        rot_w01 = 0.5 * (rot_w + 1.0)
-
-        target_quat = target_quat / torch.linalg.norm(target_quat, dim=-1, keepdim=True).clamp_min(eps)
-        desired_quat = desired_quat / torch.linalg.norm(desired_quat, dim=-1, keepdim=True).clamp_min(eps)
-        target_quat_conj = target_quat.clone()
-        target_quat_conj[:, 1:] = -target_quat_conj[:, 1:]
-
-        w1, x1, y1, z1 = desired_quat[:, 0], desired_quat[:, 1], desired_quat[:, 2], desired_quat[:, 3]
-        w2, x2, y2, z2 = target_quat_conj[:, 0], target_quat_conj[:, 1], target_quat_conj[:, 2], target_quat_conj[:, 3]
-        q_err = torch.stack(
-            (
-                w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-                w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-                w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-                w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-            ),
-            dim=-1,
+        # -----------------------------
+        # Geometry / success quantities
+        # -----------------------------
+        site_height = torch.nan_to_num(
+            self.target_site_corners_world[1, 2] - self.target_site_corners_world[0, 2],
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
         )
-        q_err = q_err / torch.linalg.norm(q_err, dim=-1, keepdim=True).clamp_min(eps)
-        q_err = torch.where(q_err[:, 0:1] < 0, -q_err, q_err)
-        angle_error = 2.0 * torch.acos(torch.clamp(q_err[:, 0], -1.0, 1.0))
-        angle_error = torch.nan_to_num(angle_error)
+        site_height = torch.clamp(site_height, min=0.0)
 
-        # ------------------------------------------------------------------
-        # Lift / success-aligned quantities
-        # ------------------------------------------------------------------
-        object_default_height = default_root_state[:, self.input_direction]
-        lift_height = (target_pos[:, 2] - object_default_height).clamp(min=0.0)
-        high_enough = (target_pos[:, 2] > object_default_height + 0.10).float()
-        small_rotation = (angle_error < 0.8).float()
-        success = grasped * high_enough * small_rotation
+        obj_xy = target_pos[:, :2]
+        site_xy = site_pos[:, :2]
+        xy_dist = torch.norm(obj_xy - site_xy, dim=-1)
+        xy_dist = torch.nan_to_num(xy_dist, nan=1e3, posinf=1e3, neginf=1e3)
 
-        # ------------------------------------------------------------------
-        # Training-feedback-informed redesign:
-        # 1) Existing policy exploits large easy rewards: orientation, xy_align,
-        #    hover_height, descend_slow, open_approach.
-        # 2) Contact and closing rewards are ~0, so the policy never learns grasp.
-        # 3) Several penalties are almost constant and do not guide behavior.
-        # 4) Demonstrations show successful trajectories still have noticeable
-        #    object motion / close timing penalties, so avoid over-penalizing them.
-        #
-        # New strategy:
-        # - Reduce all easy pre-contact rewards.
-        # - Add progress reward from hover -> descend -> near-contact.
-        # - Reward "close only when centered and low".
-        # - Strongly reward grasp and post-grasp lift.
-        # - Penalize object motion mainly when far from a valid grasp region.
-        # ------------------------------------------------------------------
+        target_site_radius = float(self.target_site_radius)
+        inside_site = xy_dist < target_site_radius
+        low_enough = target_pos[:, 2] < site_height
+        success = inside_site & low_enough
 
-        # ------------------------------------------------------------------
-        # Temperatures
-        # ------------------------------------------------------------------
-        temp_pregrasp = 0.10
-        temp_xy = 0.05
-        temp_hover_z = 0.05
-        temp_orient = 0.30
-        temp_center = 0.025
-        temp_contact_z = 0.020
-        temp_corner = 0.020
-        temp_open = 0.030
-        temp_close = 0.025
-        temp_slow_tcp = 0.10
-        temp_slow_obj = 0.10
-        temp_slow_joint = 2.0
-        temp_lift = 0.06
+        # Height margin above basket rim for stage-2/3 gating
+        lift_margin = 0.05
+        above_site_height = target_pos[:, 2] > (site_height + lift_margin)
 
-        # ------------------------------------------------------------------
-        # Core smooth features
-        # ------------------------------------------------------------------
-        pregrasp_raw = torch.exp(-pregrasp_dist / temp_pregrasp)
-        xy_raw = torch.exp(-dist_xy / temp_xy)
-        hover_z_raw = torch.exp(-torch.abs(z_rel - pregrasp_height) / temp_hover_z)
-        orient_raw = 0.35 * rot_w01 + 0.65 * torch.exp(-angle_error / temp_orient)
+        # -----------------------------
+        # Progress tracking with helper_variable
+        # helper_variable[:, 0] : grasp hold counter
+        # helper_variable[:, 1] : stage 2 achieved flag
+        # helper_variable[:, 2] : stage 3 achieved flag
+        # helper_variable[:, 3] : success latch
+        # -----------------------------
+        if self.helper_variable.shape[1] >= 4:
+            grasp_like = (
+                (torch.norm(target_to_hand, dim=-1) < 0.08)
+                & (corners_target_obj_to_hand.view(self.num_envs, -1, 3).norm(dim=-1).mean(dim=-1) < 0.12)
+            )
+            self.helper_variable[:, 0] = torch.where(
+                grasp_like,
+                torch.clamp(self.helper_variable[:, 0] + 1.0, max=1000.0),
+                torch.zeros_like(self.helper_variable[:, 0]),
+            )
+            self.helper_variable[:, 1] = torch.maximum(
+                self.helper_variable[:, 1],
+                (stage >= 2).float(),
+            )
+            self.helper_variable[:, 2] = torch.maximum(
+                self.helper_variable[:, 2],
+                (stage >= 3).float(),
+            )
+            self.helper_variable[:, 3] = torch.maximum(
+                self.helper_variable[:, 3],
+                success.float(),
+            )
 
-        center_raw = torch.exp(-dist_3d / temp_center)
-        low_z_raw = torch.exp(-torch.abs(z_rel - 0.015) / temp_contact_z)
-        corner_raw = torch.exp(-min_corner_dist / temp_corner)
+        # -----------------------------
+        # Stage masks:
+        # only shape current stage after previous is finished
+        # -----------------------------
+        stage0_mask = (stage < 1).float()
+        stage1_mask = ((stage >= 1) & (stage < 2)).float()
+        stage2_mask = ((stage >= 2) & (stage < 3)).float()
+        stage3_mask = (stage >= 3).float()
 
-        open_ref = 0.075
-        close_ref = 0.010
-        open_raw = torch.exp(-torch.abs(gripper_opening - open_ref) / temp_open)
-        close_raw = torch.exp(-torch.abs(gripper_opening - close_ref) / temp_close)
+        # -----------------------------
+        # Smooth bounded shaping terms
+        # -----------------------------
+        temp_reach = 0.10
+        temp_grasp = 0.08
+        temp_rot = 0.20
+        temp_lift = 0.10
+        temp_align_xy = 0.12
+        temp_drop = 0.06
+        temp_still = 0.50
 
-        slow_tcp_raw = torch.exp(-tcp_speed / temp_slow_tcp)
-        slow_obj_raw = torch.exp(-obj_speed / temp_slow_obj)
-        slow_joint_raw = torch.exp(-joint_speed / temp_slow_joint)
+        # Stage 0: approach and orient for grasp
+        hand_dist = torch.norm(target_to_hand, dim=-1)
+        hand_dist = torch.nan_to_num(hand_dist, nan=1e3, posinf=1e3, neginf=1e3)
+        reach_raw = torch.exp(-torch.clamp(hand_dist / temp_reach, 0.0, 50.0))
 
-        lift_progress_raw = (lift_height / 0.12).clamp(0.0, 1.0)
-        lift_target_raw = torch.exp(-torch.abs(lift_height - 0.12) / temp_lift)
+        corner_dist = corners_target_obj_to_hand.view(self.num_envs, -1, 3).norm(dim=-1).mean(dim=-1)
+        corner_dist = torch.nan_to_num(corner_dist, nan=1e3, posinf=1e3, neginf=1e3)
+        grasp_preshape_raw = torch.exp(-torch.clamp(corner_dist / temp_grasp, 0.0, 50.0))
 
-        # ------------------------------------------------------------------
-        # Stage gates
-        # ------------------------------------------------------------------
-        align_gate = xy_raw * orient_raw
-        hover_gate = align_gate * hover_z_raw
-        near_contact_gate = xy_raw * orient_raw * low_z_raw
-        very_near_contact = ((dist_xy < 0.025) & (torch.abs(z_rel - 0.015) < 0.020)).float()
+        rot_w = torch.clamp(to_desired_rot[:, 0], -1.0, 1.0)
+        rot_err = 1.0 - rot_w
+        rot_raw = torch.exp(-torch.clamp(rot_err / temp_rot, 0.0, 50.0))
 
-        # Progressive descend reward:
-        # encourage being lower only when xy/orientation are already correct.
-        descend_progress = torch.clamp((pregrasp_height - z_rel) / pregrasp_height, 0.0, 1.0)
-        desired_down_speed = 0.025
-        descend_speed_raw = torch.exp(-torch.abs(tcp_down_speed - desired_down_speed) / 0.025)
+        # Stage 1: once grasped, lift above basket height
+        lift_gap = torch.clamp((site_height + lift_margin) - target_pos[:, 2], min=0.0)
+        lift_raw = torch.exp(-torch.clamp(lift_gap / temp_lift, 0.0, 50.0))
+        grasp_stability_raw = torch.exp(-torch.clamp(torch.norm(rel_vel, dim=-1) / temp_still, 0.0, 50.0))
 
-        # Close readiness should not require exact contact, otherwise sparse.
-        close_region_raw = 0.6 * center_raw + 0.4 * low_z_raw
+        # Stage 2: move above basket in XY while staying high
+        align_xy_raw = torch.exp(-torch.clamp(xy_dist / temp_align_xy, 0.0, 50.0))
+        height_hold_raw = above_site_height.float()
 
-        # ------------------------------------------------------------------
-        # Positive terms: reduced easy rewards, increased grasp-linked rewards
-        # ------------------------------------------------------------------
-        r_pregrasp = 0.08 * pregrasp_raw * (1.0 - grasped)
-        r_xy_align = 0.12 * xy_raw * (1.0 - grasped)
-        r_hover_height = 0.08 * hover_z_raw * (1.0 - grasped)
-        r_orientation = 0.18 * orient_raw * (1.0 - 0.3 * grasped)
-        r_manipulability = 0.04 * torch.tanh(manipulability)
+        # Stage 3: reward controlled drop into basket only when above basket
+        z_to_site_bottom = torch.clamp(target_pos[:, 2] - site_height, min=0.0)
+        drop_raw = torch.exp(-torch.clamp(z_to_site_bottom / temp_drop, 0.0, 50.0))
+        obj_still_raw = torch.exp(-torch.clamp(torch.norm(site_to_target_vel, dim=-1) / temp_still, 0.0, 50.0))
 
-        r_open_approach = 0.08 * open_raw * (1.0 - very_near_contact) * (1.0 - grasped)
-        r_hover_stable = 0.16 * hover_gate * slow_tcp_raw * open_raw * (1.0 - grasped)
-        r_descend_progress = 0.55 * align_gate * descend_progress * open_raw * (1.0 - grasped)
-        r_descend_slow = 0.30 * align_gate * descend_speed_raw * open_raw * (1.0 - grasped)
+        # -----------------------------
+        # Gate each stage reward strictly
+        # -----------------------------
+        stage0_quality = 0.55 * reach_raw + 0.30 * grasp_preshape_raw + 0.15 * rot_raw
+        stage0_reward = 1.0 * stage0_mask * stage0_quality
 
-        # Main bridge to grasp: easier to optimize than previous contact terms
-        r_near_contact = 1.40 * near_contact_gate * open_raw * (1.0 - grasped)
-        r_centering = 1.10 * close_region_raw * xy_raw * orient_raw * (1.0 - grasped)
-        r_corner_clearance = 0.35 * corner_raw * near_contact_gate * (1.0 - grasped)
+        # no stage-1 shaping before stage 1 is entered
+        stage1_quality = 1.5 * lift_raw + 0.5 * grasp_stability_raw # Doubled for testing
+        stage1_reward = 1.2 * stage1_mask * stage1_quality
 
-        # Explicit close timing
-        r_close_ready = 2.20 * close_raw * close_region_raw * xy_raw * orient_raw * (1.0 - grasped)
-        r_close_bonus = 1.20 * very_near_contact * close_raw * (1.0 - grasped)
+        # no stage-2 shaping before stage 2 is entered
+        stage2_quality = align_xy_raw * height_hold_raw
+        stage2_reward = 1.5 * stage2_mask * stage2_quality
 
-        # Make actual grasp decisively better than hovering
-        r_grasp = 12.0 * grasped
-        r_hold_still = 0.80 * grasped * close_raw * slow_obj_raw
-        r_lift_progress = 8.0 * grasped * lift_progress_raw
-        r_lift_target = 8.0 * grasped * lift_target_raw * orient_raw
-        r_gentle_lift = 0.80 * grasped * slow_obj_raw * slow_tcp_raw
+        # no stage-3 shaping before stage 3 is entered
+        ready_to_drop = (xy_dist < target_site_radius * 0.8).float()
+        stage3_quality = ready_to_drop * (0.7 * drop_raw + 0.3 * obj_still_raw)
+        stage3_reward = 1.8 * stage3_mask * stage3_quality
 
-        r_slow_joint = 0.03 * slow_joint_raw
-        r_success_bonus = 30.0 * success
+        # Sparse milestone bonuses to encourage long-horizon completion
+        bonus_stage1 = 0.4 * (stage >= 1).float()
+        bonus_stage2 = 0.7 * (stage >= 2).float()
+        bonus_stage3 = 1.0 * (stage >= 3).float()
+        success_bonus = 2.5 * success.float()
 
-        # ------------------------------------------------------------------
-        # Penalties: lighter and more targeted than before
-        # ------------------------------------------------------------------
-        # Penalize object motion most when not yet in valid close region
-        p_push_obj = -0.60 * obj_speed * (1.0 - near_contact_gate) * (1.0 - grasped)
-        p_lateral = -0.18 * tcp_xy_speed * torch.exp(-dist_3d / 0.06) * (1.0 - grasped)
-        p_premature_descend = -0.15 * tcp_down_speed * (1.0 - align_gate) * (1.0 - grasped)
+        # Mild penalty for moving object far from hand before grasp
+        pregrasp_drift_penalty = -0.10 * stage0_mask * torch.clamp(torch.norm(obj_lin_vel, dim=-1), 0.0, 2.0)
 
-        # Penalize closing while still clearly not ready, but less aggressively
-        not_ready_close_gate = (1.0 - 0.7 * close_region_raw) * (1.0 - 0.5 * xy_raw)
-        not_ready_close_gate = torch.clamp(not_ready_close_gate, 0.0, 1.0)
-        p_early_close = -0.25 * close_raw * not_ready_close_gate * (1.0 - grasped)
+        # Total reward
+        reward = (
+            stage0_reward
+            + stage1_reward
+            + stage2_reward
+            + stage3_reward
+            + bonus_stage1
+            + bonus_stage2
+            + bonus_stage3
+            + success_bonus
+            + pregrasp_drift_penalty
+        )
 
-        # At valid close region, being open forever is bad
-        p_stay_open_at_contact = -0.45 * very_near_contact * open_raw * (1.0 - grasped)
+        reward = torch.nan_to_num(reward, nan=0.0, posinf=5.0, neginf=-5.0)
+        reward = torch.clamp(reward, -5.0, 5.0)
 
-        # Closing at bad pose only matters near the object
-        p_bad_close_pose = -0.20 * close_raw * torch.exp(-dist_3d / 0.05) * (1.0 - xy_raw * low_z_raw) * (1.0 - grasped)
-
-        p_object_motion = -0.12 * obj_speed * torch.exp(-dist_3d / 0.05) * (1.0 - grasped)
-        p_under_object = -0.15 * (-z_rel).clamp(min=0.0) * (1.0 - grasped)
-        p_fast_near = -0.10 * tcp_speed * near_contact_gate * (1.0 - grasped)
-        p_drop = -1.50 * grasped * torch.clamp(-target_vel[:, 2], min=0.0)
+        assert torch.isfinite(reward).all(), "Non-finite reward encountered in _get_rewards_eureka."
 
         individual_rewards_dict = {
-            "pregrasp": r_pregrasp,
-            "xy_align": r_xy_align,
-            "hover_height": r_hover_height,
-            "orientation": r_orientation,
-            "manipulability": r_manipulability,
-            "open_approach": r_open_approach,
-            "hover_stable": r_hover_stable,
-            "descend_progress": r_descend_progress,
-            "descend_slow": r_descend_slow,
-            "near_contact": r_near_contact,
-            "centering": r_centering,
-            "corner_clearance": r_corner_clearance,
-            "close_ready": r_close_ready,
-            "close_bonus": r_close_bonus,
-            "grasp": r_grasp,
-            "hold_still": r_hold_still,
-            "lift_progress": r_lift_progress,
-            "lift_target": r_lift_target,
-            "gentle_lift": r_gentle_lift,
-            "slow_joint": r_slow_joint,
-            "push_obj_penalty": p_push_obj,
-            "lateral_penalty": p_lateral,
-            "premature_descend_penalty": p_premature_descend,
-            "early_close_penalty": p_early_close,
-            "stay_open_at_contact_penalty": p_stay_open_at_contact,
-            "bad_close_pose_penalty": p_bad_close_pose,
-            "object_motion_penalty": p_object_motion,
-            "under_object_penalty": p_under_object,
-            "fast_near_penalty": p_fast_near,
-            "drop_penalty": p_drop,
-            "success_bonus": r_success_bonus,
+            "stage0_reward": torch.nan_to_num(stage0_reward, nan=0.0, posinf=5.0, neginf=-5.0),
+            "stage1_reward": torch.nan_to_num(stage1_reward, nan=0.0, posinf=5.0, neginf=-5.0),
+            "stage2_reward": torch.nan_to_num(stage2_reward, nan=0.0, posinf=5.0, neginf=-5.0),
+            "stage3_reward": torch.nan_to_num(stage3_reward, nan=0.0, posinf=5.0, neginf=-5.0),
+            "bonus_stage1": torch.nan_to_num(bonus_stage1, nan=0.0, posinf=5.0, neginf=-5.0),
+            "bonus_stage2": torch.nan_to_num(bonus_stage2, nan=0.0, posinf=5.0, neginf=-5.0),
+            "bonus_stage3": torch.nan_to_num(bonus_stage3, nan=0.0, posinf=5.0, neginf=-5.0),
+            "success_bonus": torch.nan_to_num(success_bonus, nan=0.0, posinf=5.0, neginf=-5.0),
+            "pregrasp_drift_penalty": torch.nan_to_num(pregrasp_drift_penalty, nan=0.0, posinf=5.0, neginf=-5.0),
         }
 
-        reward = torch.zeros(self.num_envs, device=device)
-        for value in individual_rewards_dict.values():
-            reward = reward + torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
-
-        reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
-        assert torch.isfinite(reward).all(), "Non-finite reward detected in _get_rewards_eureka"
-
         return reward, individual_rewards_dict
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
