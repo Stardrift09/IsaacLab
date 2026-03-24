@@ -815,7 +815,7 @@ class TestPickItUp(DirectRLEnv):
         self.grasped[env_ids].fill_(False) # stop updating with grasp detection cause no physics simulation
         self.stage[env_ids].zero_()
         self.past_relative_dist[env_ids].zero_()
-        self.prev_actions = self.actions[env_ids].zero_()
+        self.prev_actions[env_ids].zero_()
 
 
     def _get_observations(self) -> dict:
@@ -1669,11 +1669,11 @@ class TestPickItUp(DirectRLEnv):
 
 
         vel_xy = torch.norm(self.target_object.data.root_lin_vel_w[:,:2], dim=-1)
-        vel_gate = vel_xy < 0.2
-        vel_reward = torch.exp(-vel_xy / 0.1)
+        vel_gate = vel_xy < 0.6
+        vel_reward = torch.exp(-vel_xy / 0.2)
         stage4_reward = stage4_bonus + stage4_mask * (
             0.4 * xy_reward +
-            0.3 * vel_reward +
+            # 0.3 * vel_reward +
             0.3 * vel_gate * open_reward * 5 # Was scaled before
         )
 
