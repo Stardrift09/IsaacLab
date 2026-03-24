@@ -211,6 +211,11 @@ class TestPickItUp(DirectRLEnv):
     cfg: TestPickItUpCfg
 
     def __init__(self, cfg: TestPickItUpCfg, render_mode: str | None = None, **kwargs):
+        seed = cfg.seed
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+
         self.debug_vis = True
         # Only when debug_vis is true:
         self.show_robot_grasp=True
@@ -253,8 +258,8 @@ class TestPickItUp(DirectRLEnv):
         cfg.episode_length_s = episode_length * cfg.sim.dt * cfg.decimation # handling this dynamically
         
         # pdb.set_trace()
-        self.history_len = 10
-
+        self.history_len = 2
+        self.num_stages = 5
         self.debug = False  
         super().__init__(cfg, render_mode, **kwargs)
 
@@ -455,7 +460,7 @@ class TestPickItUp(DirectRLEnv):
         self.q_rel = torch.tensor([0.0014,  0.9270,  0.3749,  0.0036], device=self.device).repeat(self.num_envs, 1)
         self.past_relative_dist = torch.ones((self.num_envs, self.history_len), device=self.device)
         self.grasped = torch.zeros((self.num_envs), device=self.device, dtype=bool)
-        self.stage = torch.zeros((self.num_envs), device=self.device, dtype=bool)
+        self.stage = torch.zeros((self.num_envs,self.num_stages), device=self.device, dtype=bool)
 
         # # Specific to in the air task, randomize the initialization
         self.update_rate = 0
@@ -518,23 +523,23 @@ class TestPickItUp(DirectRLEnv):
             actuators={
                 "panda_shoulder": ImplicitActuatorCfg(
                     joint_names_expr=["panda_joint[1-4]"],
-                    effort_limit_sim=300.0,
-                    stiffness=1500.0,
-                    damping=200.0,
+                    effort_limit_sim=200.0,
+                    stiffness=600.0,
+                    damping=80.0,
                 ),
                 "panda_forearm": ImplicitActuatorCfg(
                     joint_names_expr=["panda_joint[5-7]"],
-                    effort_limit_sim=150.0,
-                    stiffness=1200.0,
-                    damping=180.0,
+                    effort_limit_sim=120.0,
+                    stiffness=500.0,
+                    damping=70.0,
                 ),
                 "panda_hand": ImplicitActuatorCfg(
                     joint_names_expr=["panda_finger_joint.*"],
-                    effort_limit_sim=500.0,
-                    stiffness=3000.0,
-                    damping=200.0,
+                    effort_limit_sim=200.0,
+                    stiffness=2e3,
+                    damping=1e2,
                 ),
-            }
+                }
         )
         self._robot = Articulation(robot_cfg)
         self.scene.articulations["robot"] = self._robot
@@ -623,11 +628,31 @@ class TestPickItUp(DirectRLEnv):
     # pre-physics step calls
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        actions = torch.cat([actions,actions[:,-1].unsqueeze(1)], dim=1) # duplicate the gripper motion
+
+
+
+        # actions = torch.cat([actions,actions[:,-1].unsqueeze(1)], dim=1) # duplicate the gripper motion
         self.actions = actions.clone().clamp(-1.0, 1.0)
-        
-        targets = self.robot_dof_targets + self.robot_dof_speed_scales * self.dt * self.actions * self.cfg.action_scale
-        self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
+
+        arm_actions = actions[:, :-1]
+        grip_action = actions[:, -1]
+
+        # Arm: continuous
+        arm_targets = self.robot_dof_targets[:, :-2] + (
+            self.robot_dof_speed_scales[:-2] * self.dt * arm_actions * self.cfg.action_scale
+        )
+        self.robot_dof_targets[:, :-2] = torch.clamp(
+            arm_targets,
+            self.robot_dof_lower_limits[:-2],
+            self.robot_dof_upper_limits[:-2]
+        )
+
+        # Gripper: binary
+        open_mask = grip_action >= 0
+        self.robot_dof_targets[open_mask, -2:] = self.robot_dof_upper_limits[-1]
+        self.robot_dof_targets[~open_mask, -2:] = self.robot_dof_lower_limits[-1]
+        # targets = self.robot_dof_targets + self.robot_dof_speed_scales * self.dt * self.actions * self.cfg.action_scale
+        # self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
 
 
     def _apply_action(self):
@@ -647,8 +672,7 @@ class TestPickItUp(DirectRLEnv):
         object_lowest_point = self._get_target_object_lowest_points()
 
         # condition for termination: for dropping the object in the basket
-        site_height = self.target_site_corners_world[1,2] - self.target_site_corners_world[0,2]
-        self.low_enough = self.target_object.data.root_pos_w[:, 2] <site_height # change the harded coded height
+        self.low_enough = self.target_object.data.root_pos_w[:, 2] <self.target_site_corners_world[1,2] # change the harded coded height
         obj_xy = self.target_object.data.root_pos_w[:, :2]
         site_pos = self.target_site.data.root_pos_w[:, :2]
         dist2 = ((obj_xy - site_pos)**2).sum(dim=-1)
@@ -669,10 +693,11 @@ class TestPickItUp(DirectRLEnv):
         q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
         angle_error = 2 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
         self.small_rotation = angle_error < 0.8
-        self.high_enough = self.target_object.data.root_pos_w[:, 2] > self.target_object.data.default_root_state[:,self.input_direction] + 0.1
 
-        terminated = self.high_enough & self.grasped
-        # terminated = self.inside_site & self.low_enough
+        lowest_z_object= self._get_target_object_lowest_points()
+        self.high_enough = lowest_z_object > self.target_site_corners_world[1,2] + 0.02
+        # terminated = self.high_enough & self.grasped
+        terminated = self.inside_site & self.low_enough
 
         # print(f"small_rotation{small_rotation}")
         # print(f"high_enough{high_enough}")
@@ -740,33 +765,33 @@ class TestPickItUp(DirectRLEnv):
         super()._reset_idx(env_ids)
         self.update_rate += 1
         # if self.update_rate%2 == 0:
-        # # update default root states for random initialization
-        #     rand_episode_idx = torch.randint(low=0, high=50, size=(1,), device=self.device).item()
-        #     if self.start_in_air:
-        #         start_idx_in_episode = self.base[rand_episode_idx]
-        #     else:
-        #         start_idx_in_episode = 0
-        #     rand_int = torch.randint(low=0, high=21, size=(1,), device=self.device).item()
-        #     idx = start_idx_in_episode + rand_int
-        #     print(idx)
-        #     print(len(self.data['franka'][rand_episode_idx]["states"]))
-        #     init_states = self.data['franka'][rand_episode_idx]["states"][idx]
-        #     robot_data = init_states['franka'] # seems that joint pos for isaaclab is always positive
-        #     robot_joint_pos = robot_data["dof_pos"]
-        #     # print(f"robot_joint_pos:{robot_joint_pos}")
-        #     robot_joint_pos['panda_finger_joint2'] = robot_joint_pos['panda_finger_joint1']
-        #     # print(f"robot_joint_pos:{robot_joint_pos}")
-        #     robot_joint_pos = {k: v.item() for k, v in robot_joint_pos.items()}
-        #     joint_values = torch.tensor(list(robot_joint_pos.values()), device=self.device)
-        #     self._robot.data.default_joint_pos[env_ids] = joint_values
+        # update default root states for random initialization
+        rand_episode_idx = torch.randint(low=0, high=50, size=(1,), device=self.device).item()
+        if self.start_in_air:
+            start_idx_in_episode = self.base[rand_episode_idx]
+        else:
+            start_idx_in_episode = 0
+        rand_int = torch.randint(low=0, high=21, size=(1,), device=self.device).item()
+        idx = start_idx_in_episode + rand_int
+        print(idx)
+        print(len(self.data['franka'][rand_episode_idx]["states"]))
+        init_states = self.data['franka'][rand_episode_idx]["states"][idx]
+        robot_data = init_states['franka'] # seems that joint pos for isaaclab is always positive
+        robot_joint_pos = robot_data["dof_pos"]
+        # print(f"robot_joint_pos:{robot_joint_pos}")
+        robot_joint_pos['panda_finger_joint2'] = robot_joint_pos['panda_finger_joint1']
+        # print(f"robot_joint_pos:{robot_joint_pos}")
+        robot_joint_pos = {k: v.item() for k, v in robot_joint_pos.items()}
+        joint_values = torch.tensor(list(robot_joint_pos.values()), device=self.device)
+        self._robot.data.default_joint_pos[env_ids] = joint_values
 
-        #     for object_name in self.object_names:
-        #         object = self.rigid_objects[object_name]
-        #         pos = torch.tensor(init_states[object_name]["pos"], device=self.device)
-        #         rot = torch.tensor(init_states[object_name]["rot"], device=self.device)
+        for object_name in self.object_names:
+            object = self.rigid_objects[object_name]
+            pos = torch.tensor(init_states[object_name]["pos"], device=self.device)
+            rot = torch.tensor(init_states[object_name]["rot"], device=self.device)
 
-        #         object.data.default_root_state[env_ids, 0:3] = pos
-        #         object.data.default_root_state[env_ids, 3:7] = rot
+            object.data.default_root_state[env_ids, 0:3] = pos
+            object.data.default_root_state[env_ids, 3:7] = rot
 
         # robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids] # TODO: recover randomization and test
@@ -838,7 +863,7 @@ class TestPickItUp(DirectRLEnv):
                 self.site_to_target_pos, # relative position from target site to target object
                 target_to_hand_vel,
                 site_to_target_vel,
-                self.grasped.unsqueeze(1),
+                self.stage,
             ),
             dim=-1,
         )
@@ -1219,7 +1244,7 @@ class TestPickItUp(DirectRLEnv):
             env_ids = self._robot._ALL_INDICES
 
         # Distance must remain small over the full history window
-        threshold = 0.02
+        threshold = 0.04
         always_small = torch.all(self.past_relative_dist[env_ids] < threshold, dim=1)
 
         left_forces_hist = self.scene["left_contact_sensor"].data.force_matrix_w_history[env_ids]
@@ -1256,7 +1281,7 @@ class TestPickItUp(DirectRLEnv):
         stable_opposing_contact = torch.all(
             opposing_contact, dim=tuple(range(1, opposing_contact.ndim))
         )
-
+        print("grasp: ",stable_opposing_contact, always_small)
         grasped = (
             stable_left_contact
             & stable_right_contact
@@ -1289,30 +1314,72 @@ class TestPickItUp(DirectRLEnv):
         return inside_site
     
 
-    def _current_stage_detection(self, env_ids: torch.Tensor | None = None):
+    def _pregrasp_detection(self, env_ids: torch.Tensor | None = None):
         if env_ids is None:
             env_ids = self._robot._ALL_INDICES
         
+        pos_diff = self.robot_grasp_pos - self.target_object.data.root_pos_w
+        pos_diff[:,2] -= 0.2
+        dist_small_z = torch.abs(pos_diff[:, 2]) < 0.05
+        dist_small_xy = torch.norm(pos_diff[:,:2],dim=-1) < 0.02
 
-        # Stage 1: cautious grasp
-        stage = self.grasped.float()
 
-        # Stage 2: grasped AND height > 0.10 m
-        
+        current_pose = self.robot_grasp_rot  # shape (N, 4)
+        desired_pose = self.q_rel   # shape (N, 4)
+        # inverse of current
+        current_pose_inv = quat_conjugate(current_pose)
+        # relative rotation
+        q_error = quat_mul(desired_pose, current_pose_inv)
+        q_error = q_error / torch.norm(q_error, dim=-1, keepdim=True).clamp_min(1e-9)
+        q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
+        angle_error = 2 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
+        small_rotation = angle_error < 0.2
+
+        pregrasp = dist_small_xy
+        return pregrasp 
+    
+
+    def _current_stage_detection(self, env_ids: torch.Tensor | None = None):
+        if env_ids is None:
+            env_ids = self._robot._ALL_INDICES
+        obj_xy = self.target_object.data.root_pos_w[:, :2]
+        site_pos = self.target_site.data.root_pos_w[:, :2]
+        dist2 = ((obj_xy - site_pos)**2).sum(dim=-1)
+        # self.inside_site = dist2 < (2*self.target_site_radius)**2
+        slight_higher = self.target_object.data.root_pos_w[:,2] > self.target_object.data.default_root_state[:,2] + 0.03
+       
+       
+        # Stage 1: pregrasp
+    
+        stage = self._pregrasp_detection().float()
+
+        # Stage 2: cautious grasp
         stage = torch.where(
-            self.grasped & self.high_enough,
+            self.grasped,
             torch.full_like(stage, 2.0),
             stage
         )
-
-        # Stage 3: grasped AND inside_site in x y direction
+        # Stage 3: grasped AND height > 0.10 m
+        
         stage = torch.where(
-            self.grasped & self.inside_site & self.high_enough,
+            self.grasped & self.high_enough,
             torch.full_like(stage, 3.0),
             stage
         )
-        
-        if self.log_mine:
+
+        # Stage 4: grasped AND inside_site in x y direction
+        stage = torch.where(
+            self.inside_site,
+            torch.full_like(stage, 4.0),
+            stage
+        )
+
+        # stage values are 1,2,3 → subtract 1 to index from 0
+        stage_long = stage.long()
+        stage_one_hot = torch.nn.functional.one_hot(stage_long, num_classes=self.num_stages).float()
+
+
+        if self.log_mine and self.log_stage:
             for i in range(20):
                 self.summary_writer_mine.add_scalars(
                     f"r_lift_progress/env_{i}",
@@ -1325,7 +1392,7 @@ class TestPickItUp(DirectRLEnv):
                     self._sim_step_counter
                 )
 
-        return stage # [self.num_envs]
+        return stage_one_hot # [self.num_envs, 5]
 
 
     def define_markers(self) -> VisualizationMarkers:
@@ -1449,91 +1516,139 @@ class TestPickItUp(DirectRLEnv):
         return reward, individual_rewards
 
 
-
-
-    def _get_rewards_test(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def _get_rewards_test(self):
         import torch
 
-        eps = 1e-8
+        stage0_mask = self.stage[:, 0]
+        stage1_mask = self.stage[:, 1]
+        stage2_mask = self.stage[:, 2]
+        stage3_mask = self.stage[:, 3]
+        stage4_mask = self.stage[:, 4]
+        
+        stage1_bonus = stage1_mask.float() * 1
+        stage2_bonus = stage2_mask.float() * 2 # grasped
+        stage3_bonus = stage3_mask.float() * 3
+        stage4_bonus = stage4_mask.float() * 4
+        self.helper_variable[:, 0] = torch.max(self.helper_variable[:, 0], stage0_mask)  # If stage0 pregrasp has ever been reached
 
-        # ------------------------------------------------------------------
-        # Inputs
-        # ------------------------------------------------------------------
-        tcp_pos = torch.nan_to_num(self.robot_grasp_pos)
-        target_pos = torch.nan_to_num(self.target_object.data.root_pos_w.clone())
+        # target position: 20 cm above object
+        target_pos = self.target_object.data.root_pos_w.clone()
         target_pos[:, 2] += 0.2
 
-        manipulability = torch.nan_to_num(self.manipulability).clamp(min=0.0)
+        pos_diff = self.robot_grasp_pos - target_pos
+        xy_err = torch.norm(pos_diff[:, :2], dim=-1)
+        z_err = torch.abs(pos_diff[:, 2])
+        pos_error = torch.norm(pos_diff, dim=-1)
 
-        # ------------------------------------------------------------------
-        # Position tracking
-        # ------------------------------------------------------------------
-        pos_delta = tcp_pos - target_pos
-        pos_error = torch.linalg.norm(pos_delta, dim=-1)
+        # smoother position shaping
+        r_xy = torch.exp(-xy_err / 0.10)
+        r_z = torch.exp(-z_err / 0.10)
+        r_pos = torch.exp(-pos_error / 0.10)
 
-        # Gaussian-style reward: smoother and more standard than exp(-d / c)
-        pos_sigma = 0.10
-        r_position = torch.exp(-(pos_error ** 2) / (2 * pos_sigma ** 2))
+        # rotation error
+        current_q = self.robot_grasp_rot
+        desired_q = self.q_rel
 
-        # Optional: success-style bonus when very close
-        pos_close_thresh = 0.03
-        r_pos_bonus = (pos_error < pos_close_thresh).float()
+        current_q_inv = quat_conjugate(current_q)
+        q_error = quat_mul(desired_q, current_q_inv)
+        q_error = q_error / torch.norm(q_error, dim=-1, keepdim=True).clamp_min(1e-9)
+        # assumes [w, x, y, z]
+        q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
+        angle_error = 2.0 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
 
-        # ------------------------------------------------------------------
-        # Orientation tracking
-        # Assumes self.to_desired_rot is the relative quaternion from current to desired
-        # Quaternion format assumed: [w, x, y, z]
-        # ------------------------------------------------------------------
-        q_error = torch.nan_to_num(self.to_desired_rot)
-        q_error = q_error / torch.linalg.norm(q_error, dim=-1, keepdim=True).clamp_min(eps)
+        r_rot = torch.exp(-angle_error / 2)
 
-        # Resolve quaternion sign ambiguity
-        q_error = torch.where(q_error[:, 0:1] < 0.0, -q_error, q_error)
+        stage0_reward = stage0_mask * (0.5 * r_pos + 0.5 * r_rot)
 
-        # Angle in [0, pi]
-        qw = torch.clamp(q_error[:, 0], -1.0 + eps, 1.0 - eps)
-        angle_error = 2.0 * torch.acos(qw)
-        # print(angle_error)
-        print(self.robot_grasp_rot)
-        ori_sigma = 0.30
-        r_orientation_raw = torch.exp(-(angle_error ** 2) / (2 * ori_sigma ** 2))
 
-        # Gate orientation reward by position proximity
-        # This prevents the policy from trying to perfectly orient while still far away
-        orientation_gate = torch.exp(-(pos_error ** 2) / (2 * (0.15 ** 2)))
-        r_orientation = orientation_gate * r_orientation_raw
 
-        # Optional orientation success bonus
-        ori_close_thresh = 0.15  # radians
-        r_ori_bonus = ((angle_error < ori_close_thresh) & (pos_error < 0.05)).float()
 
-        # ------------------------------------------------------------------
-        # Manipulability reward
-        # Keep small so it does not dominate tracking
-        # ------------------------------------------------------------------
-        r_manipulability = torch.tanh(manipulability)
+        pos_diff_stage_1 = self.robot_grasp_pos - self.target_object.data.root_pos_w
+        pos_error_stage_1 = torch.norm(pos_diff_stage_1, dim=-1)
 
-        # ------------------------------------------------------------------
-        # Final reward
-        # ------------------------------------------------------------------
-        reward = (
-            2.5 * r_position +
-            1.5 * r_orientation +
-            0.1 * r_manipulability
+        # gripper action
+        gripper_action = self.actions[:, -1]
+
+        # open reward (target = +1)
+        open_error = torch.abs(gripper_action - 1.0)
+        open_reward = torch.exp(-open_error / 0.5)
+        open_reward *= 0.2
+
+        # close reward (target = -1)
+        close_error = torch.abs(gripper_action + 1.0)
+        close_reward = torch.exp(-close_error / 0.5)
+        close_reward += 0.2  # keep your monotonic shaping
+
+        # condition stays the same
+        close_condition = pos_error_stage_1 < 0.04
+
+        # final reward
+        gripper_reward = torch.where(close_condition, close_reward, open_reward)
+        # if close_condition.float().mean() > 0.6:
+        #     pdb.set_trace()
+
+        # reward descending while staying close in xy
+        # pos_diff[:, 2] > 0 means gripper is above the target
+        above_target = torch.clamp(pos_error_stage_1, min=0.0)
+        descend_reward = (torch.exp(-above_target / 0.1) - torch.exp(torch.tensor(-1.0, device=self.device))) # not constrained to 
+
+        stage1_reward = stage1_bonus + stage1_mask * (
+            0.4 * gripper_reward +
+            0.5 * descend_reward +
+            0.1 * r_rot 
+
         )
 
-        individual_rewards = {
-            # "position_tracking": r_position,
-            # "position_bonus": r_pos_bonus,
-            # "orientation_tracking": r_orientation,
-            # "orientation_tracking_raw": r_orientation_raw,
-            # "orientation_gate": orientation_gate,
-            # "orientation_bonus": r_ori_bonus,
-            # "manipulability": r_manipulability,
+        lowest_z_object= self._get_target_object_lowest_points()
+        ascend_diff = lowest_z_object - self.target_site_corners_world[1,2] - 0.05
+        ascend_reward = torch.exp(- torch.abs(ascend_diff)/ 0.1)
+        # print(self.high_enough)
+        stage2_reward = stage2_bonus + stage2_mask * (
+            1 * ascend_reward
+        )
+
+
+
+        pos_diff_site = self.target_object.data.root_pos_w - self.target_site.data.root_pos_w
+        pos_diff_site_xy = pos_diff_site[:,:2]
+        xy_err_site = torch.norm(pos_diff_site_xy, dim=-1)
+        xy_reward = torch.exp(-xy_err_site / 0.10)
+        # print(xy_err_site)
+        stage3_reward = stage3_bonus + stage3_mask * (
+            0.2 * ascend_reward +
+            0.8 * xy_reward
+        )
+        stage4_reward = stage4_bonus
+        reward = stage0_reward + stage1_reward + stage2_reward + stage3_reward + stage4_reward
+
+        return reward, {
+            "xy_err": xy_err,
+            "z_err": z_err,
             "pos_error": pos_error,
             "angle_error": angle_error,
-        }
-
-        return reward, individual_rewards
-
-
+            "r_xy": r_xy,
+            "r_z": r_z,
+            "r_rot": r_rot,
+            "pos_error_stage_1": pos_error_stage_1,
+            "gripper_pos": self._robot.data.joint_pos[:,-1],
+            "ascend_diff": ascend_diff,
+            "xy_err_site" : xy_err_site,
+            "open_reward": open_reward,
+            "close_reward": close_reward,
+            "gripper_reward": gripper_reward,
+            "descend_reward": descend_reward,
+            "close_condition": close_condition.float(),
+            "ascend_reward": ascend_reward,
+            "xy_reward": xy_reward,
+            "stage0_mask": stage0_mask,
+            "stage1_mask": stage1_mask,
+            "stage2_mask": stage2_mask,
+            "stage3_mask": stage3_mask,
+            "stage4_mask": stage4_mask,
+            "stage0_reward": stage0_reward,
+            "stage1_reward": stage1_reward,
+            "stage2_reward": stage2_reward,
+            "stage3_reward": stage3_reward,      
+            "stage4_reward": stage4_reward,     
+        }   
+    
