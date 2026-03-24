@@ -461,7 +461,7 @@ class TestPickItUp(DirectRLEnv):
         self.past_relative_dist = torch.ones((self.num_envs, self.history_len), device=self.device)
         self.grasped = torch.zeros((self.num_envs), device=self.device, dtype=bool)
         self.stage = torch.zeros((self.num_envs,self.num_stages), device=self.device, dtype=bool)
-
+        self.prev_actions = torch.zeros((self.num_envs, cfg.action_space), device=self.device)
         # # Specific to in the air task, randomize the initialization
         self.update_rate = 0
         self.base = torch.tensor([ 91,  66,  67, 110,  66,  84, 106,  81,  54,  83,  72,  63,  68,  63,
@@ -629,11 +629,8 @@ class TestPickItUp(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
 
-
-
         # actions = torch.cat([actions,actions[:,-1].unsqueeze(1)], dim=1) # duplicate the gripper motion
         self.actions = actions.clone().clamp(-1.0, 1.0)
-
         arm_actions = actions[:, :-1]
         grip_action = actions[:, -1]
 
@@ -667,9 +664,7 @@ class TestPickItUp(DirectRLEnv):
         self.manipulability = self._compute_manipulability()
         self.grasped = self._grasp_detection() # [num_envs]
         self._update_past_relative_dist()
-
-
-        object_lowest_point = self._get_target_object_lowest_points()
+        self.prev_actions = self.actions.clone()
 
         # condition for termination: for dropping the object in the basket
         self.low_enough = self.target_object.data.root_pos_w[:, 2] <self.target_site_corners_world[1,2] # change the harded coded height
@@ -820,6 +815,8 @@ class TestPickItUp(DirectRLEnv):
         self.grasped[env_ids].fill_(False) # stop updating with grasp detection cause no physics simulation
         self.stage[env_ids].zero_()
         self.past_relative_dist[env_ids].zero_()
+        self.prev_actions = self.actions[env_ids].zero_()
+
 
     def _get_observations(self) -> dict:
         """
@@ -827,16 +824,70 @@ class TestPickItUp(DirectRLEnv):
 
         Objects' root_pos_w is their center, and site's root_pos_w is the bottom center.  
         self.rigid_objects is a list with all RigidObjects
-
+        Action space is 8-dim, and gripper action is symmetric: last dim being larger than 0 means opening gripper.
         self.to_desired_rot, # the quaterion that goes from current to desired quat, apply reward on this: specifically high reward for the first element w to be 1!!!
         self.helper_variable = torch.zeros((self.num_envs, 10), device=self.device)
         self.target_site_corners_world # you can read the three dim from the [2, 3] tensor storing min(first row) and max corner of the site in local env frame
-        self.stage=self._current_stage_detection # [self.num_envs]
-            stage 0: beginning of the task
-            stage 1: Object is grasped and relative distance has been small for 10 steps
-            stage 2: Object is lifted up to be higher than target site.
-            stage 3: Object is right above the target site and ready to be dropped.
-        )
+        self.stage=self._current_stage_detection() # [self.num_envs, 5]
+
+        def _pregrasp_detection(self, env_ids: torch.Tensor | None = None):
+            if env_ids is None:
+                env_ids = self._robot._ALL_INDICES
+
+            current_pose = self.robot_grasp_rot  # shape (N, 4)
+            desired_pose = self.q_rel   # shape (N, 4)
+            # inverse of current
+            current_pose_inv = quat_conjugate(current_pose)
+            # relative rotation
+            q_error = quat_mul(desired_pose, current_pose_inv)
+            q_error = q_error / torch.norm(q_error, dim=-1, keepdim=True).clamp_min(1e-9)
+            q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
+            angle_error = 2 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
+            small_rotation = angle_error < 0.2
+
+            pregrasp = dist_small_xy
+            return pregrasp 
+        
+
+        def _current_stage_detection(self, env_ids: torch.Tensor | None = None):
+            if env_ids is None:
+                env_ids = self._robot._ALL_INDICES
+            obj_xy = self.target_object.data.root_pos_w[:, :2]
+            site_pos = self.target_site.data.root_pos_w[:, :2]
+            dist2 = ((obj_xy - site_pos)**2).sum(dim=-1)
+            # self.inside_site = dist2 < (2*self.target_site_radius)**2
+
+        
+        
+            # Stage 1: pregrasp
+            stage = self._pregrasp_detection().float()
+
+            # Stage 2:
+            stage = torch.where(
+                self.grasped,
+                torch.full_like(stage, 2.0),
+                stage
+            )
+
+            # Stage 3:
+            stage = torch.where(
+                self.grasped & self.high_enough,
+                torch.full_like(stage, 3.0),
+                stage
+            )
+
+            # Stage 4: inside_site
+            stage = torch.where(
+                self.inside_site,
+                torch.full_like(stage, 4.0),
+                stage
+            )
+
+            stage_long = stage.long()
+            stage_one_hot = torch.nn.functional.one_hot(stage_long, num_classes=self.num_stages).float()
+
+            return stage_one_hot # [self.num_envs, 5]
+            )
         """
 
 
@@ -864,6 +915,7 @@ class TestPickItUp(DirectRLEnv):
                 target_to_hand_vel,
                 site_to_target_vel,
                 self.stage,
+                self.prev_actions - self.actions # add penalty on delta action
             ),
             dim=-1,
         )
@@ -1342,12 +1394,6 @@ class TestPickItUp(DirectRLEnv):
     def _current_stage_detection(self, env_ids: torch.Tensor | None = None):
         if env_ids is None:
             env_ids = self._robot._ALL_INDICES
-        obj_xy = self.target_object.data.root_pos_w[:, :2]
-        site_pos = self.target_site.data.root_pos_w[:, :2]
-        dist2 = ((obj_xy - site_pos)**2).sum(dim=-1)
-        # self.inside_site = dist2 < (2*self.target_site_radius)**2
-        slight_higher = self.target_object.data.root_pos_w[:,2] > self.target_object.data.default_root_state[:,2] + 0.03
-       
        
         # Stage 1: pregrasp
     
@@ -1618,9 +1664,33 @@ class TestPickItUp(DirectRLEnv):
             0.2 * ascend_reward +
             0.8 * xy_reward
         )
-        stage4_reward = stage4_bonus
-        reward = stage0_reward + stage1_reward + stage2_reward + stage3_reward + stage4_reward
 
+
+
+
+        vel_xy = torch.norm(self.target_object.data.root_lin_vel_w[:,:2], dim=-1)
+        vel_gate = vel_xy < 0.2
+        vel_reward = torch.exp(-vel_xy / 0.1)
+        stage4_reward = stage4_bonus + stage4_mask * (
+            0.4 * xy_reward +
+            0.3 * vel_reward +
+            0.3 * vel_gate * open_reward * 5 # Was scaled before
+        )
+
+        success = self.inside_site & self.low_enough
+        success_reward = 16 * 40 * success
+
+
+        pos_delta = torch.norm(self.prev_actions - self.actions, dim=-1)
+
+        reward = (stage0_reward + 
+        stage1_reward + 
+        stage2_reward + 
+        stage3_reward + 
+        stage4_reward + 
+        success_reward -
+        pos_delta * 0.01
+        )
         return reward, {
             "xy_err": xy_err,
             "z_err": z_err,
@@ -1633,6 +1703,7 @@ class TestPickItUp(DirectRLEnv):
             "gripper_pos": self._robot.data.joint_pos[:,-1],
             "ascend_diff": ascend_diff,
             "xy_err_site" : xy_err_site,
+            "vel_xy": vel_xy,
             "open_reward": open_reward,
             "close_reward": close_reward,
             "gripper_reward": gripper_reward,
@@ -1649,6 +1720,7 @@ class TestPickItUp(DirectRLEnv):
             "stage1_reward": stage1_reward,
             "stage2_reward": stage2_reward,
             "stage3_reward": stage3_reward,      
-            "stage4_reward": stage4_reward,     
+            "stage4_reward": stage4_reward,  
+            "success": success,  
         }   
     
