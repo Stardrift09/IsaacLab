@@ -517,7 +517,7 @@ class TestPickItUp(DirectRLEnv):
                     max_depenetration_velocity=5.0,
                 ),
                 articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                    enabled_self_collisions=False, solver_position_iteration_count=12, solver_velocity_iteration_count=1
+                    enabled_self_collisions=False, solver_position_iteration_count=12, solver_velocity_iteration_count=4
                 ),
             ),
             debug_vis=True,
@@ -773,8 +773,8 @@ class TestPickItUp(DirectRLEnv):
             start_idx_in_episode = 0
         rand_int = torch.randint(low=0, high=21, size=(1,), device=self.device).item()
         idx = start_idx_in_episode + rand_int
-        print(idx)
-        print(len(self.data['franka'][rand_episode_idx]["states"]))
+        # print(idx)
+        # print(len(self.data['franka'][rand_episode_idx]["states"]))
         init_states = self.data['franka'][rand_episode_idx]["states"][idx]
         robot_data = init_states['franka'] # seems that joint pos for isaaclab is always positive
         robot_joint_pos = robot_data["dof_pos"]
@@ -1524,7 +1524,7 @@ class TestPickItUp(DirectRLEnv):
         qw = torch.clamp(q_error[:, 0], -1.0 + eps, 1.0 - eps)
         angle_error = 2.0 * torch.acos(qw)
         # print(angle_error)
-        print(self.robot_grasp_rot)
+        # print(self.robot_grasp_rot)
         ori_sigma = 0.30
         r_orientation_raw = torch.exp(-(angle_error ** 2) / (2 * ori_sigma ** 2))
 
