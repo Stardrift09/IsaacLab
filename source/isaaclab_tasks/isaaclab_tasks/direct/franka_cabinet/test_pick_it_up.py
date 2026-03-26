@@ -526,27 +526,27 @@ class TestPickItUp(DirectRLEnv):
                 pos=robot_data["pos"],
                 rot=robot_data["rot"],
             ),
-        actuators={
-            "panda_shoulder": ImplicitActuatorCfg(
-                joint_names_expr=["panda_joint[1-4]"],
-                effort_limit_sim=87.0,
-                stiffness=80.0,
-                damping=4.0,
-            ),
-            "panda_forearm": ImplicitActuatorCfg(
-                joint_names_expr=["panda_joint[5-7]"],
-                effort_limit_sim=12.0,
-                stiffness=80.0,
-                damping=4.0,
-            ),
-            "panda_hand": ImplicitActuatorCfg(
-                joint_names_expr=["panda_finger_joint.*"],
-                effort_limit_sim=200.0,
-                stiffness=2e3,
-                damping=1e2,
-            ),
-        },
-    )
+            actuators={
+                "panda_shoulder": ImplicitActuatorCfg(
+                    joint_names_expr=["panda_joint[1-4]"],
+                    effort_limit_sim=200.0,
+                    stiffness=600.0,
+                    damping=80.0,
+                ),
+                "panda_forearm": ImplicitActuatorCfg(
+                    joint_names_expr=["panda_joint[5-7]"],
+                    effort_limit_sim=120.0,
+                    stiffness=500.0,
+                    damping=70.0,
+                ),
+                "panda_hand": ImplicitActuatorCfg(
+                    joint_names_expr=["panda_finger_joint.*"],
+                    effort_limit_sim=200.0,
+                    stiffness=2e3,
+                    damping=1e2,
+                ),
+                }
+        )
         self._robot = Articulation(robot_cfg)
         self.scene.articulations["robot"] = self._robot
 
