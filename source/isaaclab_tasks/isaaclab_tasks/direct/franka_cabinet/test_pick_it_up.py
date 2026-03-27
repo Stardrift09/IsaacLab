@@ -101,7 +101,7 @@ class TestPickItUpCfg(DirectRLEnvCfg):
             ),
             "panda_hand": ImplicitActuatorCfg(
                 joint_names_expr=["panda_finger_joint.*"],
-                effort_limit_sim=200.0,
+                effort_limit_sim=20.0, # Reducing from 200, see if this mitigates oscillation
                 stiffness=2e3,
                 damping=1e2,
             ),
@@ -215,7 +215,7 @@ class TestPickItUp(DirectRLEnv):
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
-
+        self.discrete_action = True
         self.debug_vis = True
         # Only when debug_vis is true:
         self.show_robot_grasp=True
@@ -635,27 +635,31 @@ class TestPickItUp(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self.prev_actions = self.actions.clone()
-        # actions = torch.cat([actions,actions[:,-1].unsqueeze(1)], dim=1) # duplicate the gripper motion
         self.actions = actions.clone().clamp(-1.0, 1.0)
-        arm_actions = actions[:, :-1]
-        grip_action = actions[:, -1]
+        
+        
+        if self.discrete_action:
+            arm_actions = actions[:, :-1]
+            grip_action = actions[:, -1]
 
-        # Arm: continuous
-        arm_targets = self.robot_dof_targets[:, :-2] + (
-            self.robot_dof_speed_scales[:-2] * self.dt * arm_actions * self.cfg.action_scale
-        )
-        self.robot_dof_targets[:, :-2] = torch.clamp(
-            arm_targets,
-            self.robot_dof_lower_limits[:-2],
-            self.robot_dof_upper_limits[:-2]
-        )
+            # Arm: continuous
+            arm_targets = self.robot_dof_targets[:, :-2] + (
+                self.robot_dof_speed_scales[:-2] * self.dt * arm_actions * self.cfg.action_scale
+            )
+            self.robot_dof_targets[:, :-2] = torch.clamp(
+                arm_targets,
+                self.robot_dof_lower_limits[:-2],
+                self.robot_dof_upper_limits[:-2]
+            )
 
-        # Gripper: binary
-        open_mask = grip_action >= 0
-        self.robot_dof_targets[open_mask, -2:] = self.robot_dof_upper_limits[-1]
-        self.robot_dof_targets[~open_mask, -2:] = self.robot_dof_lower_limits[-1]
-        # targets = self.robot_dof_targets + self.robot_dof_speed_scales * self.dt * self.actions * self.cfg.action_scale
-        # self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
+            # Gripper: binary
+            open_mask = grip_action >= 0
+            self.robot_dof_targets[open_mask, -2:] = self.robot_dof_upper_limits[-1]
+            self.robot_dof_targets[~open_mask, -2:] = self.robot_dof_lower_limits[-1]
+        else:
+            actions = torch.cat([actions,actions[:,-1].unsqueeze(1)], dim=1) # duplicate the gripper motion
+            targets = self.robot_dof_targets + self.robot_dof_speed_scales * self.dt * actions * self.cfg.action_scale
+            self.robot_dof_targets[:] = torch.clamp(targets, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
 
 
     def _apply_action(self):
