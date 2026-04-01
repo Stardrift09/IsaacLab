@@ -18,16 +18,18 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.sim.utils.stage import get_current_stage
 from isaaclab.terrains import TerrainImporterCfg
-from isaaclab.utils import configclass
+from isaaclab.utils import configclass, convert_dict_to_backend
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.math import sample_uniform, quat_inv, quat_mul, transform_points, quat_conjugate, quat_apply
 from torch.utils.tensorboard import SummaryWriter
-# from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+from isaaclab.sensors.camera import Camera, CameraCfg
 from isaaclab.sensors.contact_sensor.contact_sensor import ContactSensor
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 
 import pdb
+import os
+import numpy as np
 from isaaclab_eureka.utils import eureka_root_dir, read_pkl
 
 @configclass
@@ -54,7 +56,7 @@ class TestPickItUpCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=2048, env_spacing=3.0, replicate_physics=True, clone_in_fabric=False, 
+        num_envs=1024, env_spacing=3.0, replicate_physics=True, clone_in_fabric=False, # See if 2048 works
     )
 
 
@@ -218,9 +220,11 @@ class TestPickItUp(DirectRLEnv):
         self.discrete_action = True
         self.debug_vis = True
         # Only when debug_vis is true:
-        self.show_robot_grasp=True
+        self.show_robot_grasp=False
         self.show_target_object=False
         self.show_target_grasp_pose=True
+
+        self.camera_sensor_record = True
 
         self.log_mine = False
         self.start_in_air = False
@@ -590,6 +594,9 @@ class TestPickItUp(DirectRLEnv):
         self.target_object : RigidObject = self.rigid_objects[self.target_object_name]
         self.target_site = self.rigid_objects[self.target_site_name]
 
+        if self.camera_sensor_record:
+            self.define_camera() # Single camera, should not be added to the scene
+
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
@@ -623,9 +630,9 @@ class TestPickItUp(DirectRLEnv):
         self._left_contact_sensors = ContactSensor(left_contact_sensor_cfg)
         self._right_contact_sensors = ContactSensor(right_contact_sensor_cfg)
         self.scene.sensors["left_contact_sensor"] = self._left_contact_sensors
-        self._left_contact_sensors.set_debug_vis(True)
+        self._left_contact_sensors.set_debug_vis(False)
         self.scene.sensors["right_contact_sensor"] = self._right_contact_sensors
-        self._right_contact_sensors.set_debug_vis(True)
+        self._right_contact_sensors.set_debug_vis(False)
 
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -714,7 +721,6 @@ class TestPickItUp(DirectRLEnv):
         # print(ratio)
 
         self.stage = self._current_stage_detection()
-
         if self.debug_vis:
             self.debug_vis_mine()
 
@@ -898,7 +904,6 @@ class TestPickItUp(DirectRLEnv):
             return stage_one_hot # [self.num_envs, 5]
             )
         """
-
 
         dof_pos_scaled = (
             2.0
@@ -1238,6 +1243,182 @@ class TestPickItUp(DirectRLEnv):
                     #         writer.add_scalar("Replay/"+k, eureka_episode_sums[k].mean().item(), t)                        
             self._reset_idx(env_ids)
 
+
+    def run_single_traj_and_get_vlm_feedback(self, policy_nn, policy, output_dir: str) -> str: 
+        import omni.replicator.core as rep
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)  # creates the directory (and any parent directories if needed)
+
+        # camera on the 0th env
+        camera = self.camera
+        # Firstly set up the camera
+        # Then reset the environment and step all environment together
+        env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        self._reset_idx(env_ids=env_ids)
+        rep_writer = rep.BasicWriter(
+            output_dir=output_dir,
+            frame_padding=0,
+
+        )
+        offset = torch.tensor(self.data['franka'][0]["states"][self.start_idx_in_episode]['franka']["pos"], device=self.device)
+        env_origin = self.scene.env_origins[0]
+
+        camera_positions = torch.tensor([[1.24047, 0.0246736, 0.74118]], device=self.device) + env_origin
+        camera_targets = torch.tensor([[0.0, 0.0, 0.0]], device=self.device) + env_origin + offset
+        camera_orientations = torch.tensor(  # noqa: F841
+        [[0.648518, 0.626944, -0.286825, -0.322639]], device=self.device
+        ) # This is not being used
+        camera.set_world_poses_from_view(camera_positions, camera_targets)
+        camera_index = 0 # I only use one camera so this is the only index
+        obs = self._get_observations()
+        for i in range(self.max_episode_length):
+            actions = policy(obs)
+            obs, rewards, terminated, time_outs , extras = self.step(actions)
+            # reset recurrent states for episodes that have terminated
+            dones = terminated | time_outs
+            policy_nn.reset(dones)
+            camera.update(dt=self.sim.get_physics_dt())
+            # if "rgb" in camera.data.output.keys():
+            #     print("Received shape of rgb image        : ", camera.data.output["rgb"].shape)
+            # Save images from camera at camera_index
+            # note: BasicWriter only supports saving data in numpy format, so we need to convert the data to numpy.
+            single_cam_data = convert_dict_to_backend(
+                {k: v[camera_index] for k, v in camera.data.output.items()}, backend="numpy"
+            )
+
+            # Extract the other information
+            single_cam_info = camera.data.info[camera_index]
+
+            # Pack data back into replicator format to save them using its writer
+            rep_output = {"annotators": {}}
+            for key, data, info in zip(single_cam_data.keys(), single_cam_data.values(), single_cam_info.values()):
+                if info is not None:
+                    rep_output["annotators"][key] = {"render_product": {"data": data, **info}}
+                else:
+                    rep_output["annotators"][key] = {"render_product": {"data": data}}
+            # Save images
+            # Note: We need to provide On-time data for Replicator to save the images.
+            rep_output["trigger_outputs"] = {"on_time": camera.frame[camera_index]}
+            rep_writer.write(rep_output)
+            if dones[0]:
+                print("env has finished one episode")
+                break
+        output_text = self.get_feedback_from_vlm(output_dir=output_dir)
+        return output_text
+    
+    def define_camera(self) -> Camera:
+        """Defines the camera sensor to add to the scene."""
+        # Setup camera sensor
+        # In contrast to the ray-cast camera, we spawn the prim at these locations.
+        # This means the camera sensor will be attached to these prims.
+        sim_utils.create_prim("/World/Origin_00", "Xform")
+        camera_cfg = CameraCfg(
+            prim_path="/World/Origin_.*/CameraSensor",
+            update_period=0,
+            height=224,
+            width=224,
+            data_types=[
+                "rgb",
+                # "distance_to_image_plane",
+                # "normals",
+                # "semantic_segmentation",
+                # "instance_segmentation_fast",
+                # "instance_id_segmentation_fast",
+            ],
+            # colorize_semantic_segmentation=True,
+            # colorize_instance_id_segmentation=True,
+            # colorize_instance_segmentation=True,
+            spawn=sim_utils.PinholeCameraCfg(
+                focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
+            ),
+        )
+        # Create camera
+        self.camera = Camera(cfg=camera_cfg)
+
+
+    def get_feedback_from_vlm(self, output_dir) -> str:
+        from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor
+        from qwen_vl_utils import process_vision_info
+        use_cpu = True
+        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            "prithivMLmods/DeepCaption-VLA-7B", torch_dtype="auto", device_map="cpu" if use_cpu else "auto"
+        )
+        processor = AutoProcessor.from_pretrained("prithivMLmods/DeepCaption-VLA-7B")
+        num_samples = 30
+        all_files = sorted([
+            f for f in os.listdir(output_dir)
+            if f.endswith(".png") and f.startswith("rgb_")
+        ])
+        # Extract frame indices from filenames
+        frame_indices = [int(f.split("_")[1]) for f in all_files]
+        # Automatically determine start_index (first frame)
+        start_index = min(frame_indices)
+        # Keep files with frame_index >= start_index
+        all_files = [f for f, idx in zip(all_files, frame_indices) if idx >= start_index]
+
+        # If more files than num_samples, evenly sample without shuffling
+        if len(all_files) > num_samples:
+            indices = np.linspace(0, len(all_files)-1, num_samples, dtype=int)
+            sampled_files = [all_files[i] for i in indices]
+        else:
+            sampled_files = all_files
+        # Prepare image messages
+        images_content = [{"type": "image", "image": os.path.join(output_dir, f)} for f in sampled_files]
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    *images_content,
+                    {
+                        "type": "text",
+                        "text": """
+                        Analyze the sequence of images.
+
+                        There is one coordinate frame attached to the object.
+
+                        Answer the following questions. For each question:
+                        - Repeat the question and answer using ONLY: (yes / no / unsure)
+
+                        Questions:
+
+                        Q1: Is the object grasped at any point in the sequence?
+                        A1: <yes/no/unsure>
+
+                        Q2: Is the object positioned above the basket at any point?
+                        A2: <yes/no/unsure>
+
+                        Q3: In the final frame, is the origin of the object coordinate frame located at the center of the gripper (which indicates that the object is not dropped)?
+                        A3: <yes/no/unsure>
+
+                        Reasoning: <brief explanation based on visible alignment and motion of the coordinate frames>
+                        """
+                    },
+                ],
+            }
+        ]
+        text = processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        )
+        if not use_cpu:
+            inputs = inputs.to("cuda")
+
+        generated_ids = model.generate(**inputs, max_new_tokens=512)
+        generated_ids_trimmed = [
+            out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
+        output_text = processor.batch_decode(
+            generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )
+        return output_text[0]
 
 
 
