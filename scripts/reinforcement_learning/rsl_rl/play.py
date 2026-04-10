@@ -193,7 +193,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
-
+        # env.unwrapped.run_single_traj_and_get_vlm_feedback(policy_nn, policy, "/home/shaotongchen/workspace_eureka/IsaacLabEureka/logs/picture_test")
+        # break
         # time delay for real-time evaluation
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:

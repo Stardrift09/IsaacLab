@@ -224,7 +224,7 @@ class TestPickItUp(DirectRLEnv):
         self.show_target_object=False
         self.show_target_grasp_pose=True
 
-        self.camera_sensor_record = True
+        self.camera_sensor_record = False
 
         self.log_mine = False
         self.start_in_air = False
@@ -1848,7 +1848,10 @@ class TestPickItUp(DirectRLEnv):
         pos_diff_site = self.target_object.data.root_pos_w - self.target_site.data.root_pos_w
         pos_diff_site_xy = pos_diff_site[:,:2]
         xy_err_site = torch.norm(pos_diff_site_xy, dim=-1)
-        xy_reward = torch.exp(-xy_err_site / 0.10)
+        # Use two-scale xy reward: wide scale gives gradient when far, tight scale rewards precision
+        xy_reward_wide = torch.exp(-xy_err_site / 0.3)   # gradient even at 1m away
+        xy_reward_tight = torch.exp(-xy_err_site / 0.10) # precision signal when close
+        xy_reward = 0.5 * xy_reward_wide + 0.5 * xy_reward_tight
         # print(xy_err_site)
         stage3_reward = stage3_bonus + stage3_mask * (
             0.2 * ascend_reward +
@@ -1858,26 +1861,39 @@ class TestPickItUp(DirectRLEnv):
 
 
 
-        vel_xy = torch.norm(self.target_object.data.root_lin_vel_w[:,:2], dim=-1)
-        vel_gate = vel_xy < 0.6
-        vel_reward = torch.exp(-vel_xy / 0.2)
-        stage4_reward = stage4_bonus + stage4_mask * (
-            0.4 * xy_reward +
-            # 0.3 * vel_reward +
-            0.3 * vel_gate * open_reward * 5 # Was scaled before
-        )
 
         success = self.inside_site & self.low_enough
         success_reward = 16 * 40 * success
 
+        # Stage 4: inside site -> retract arm up and release gripper so object drops into basket
+        obj_z = self.target_object.data.root_pos_w[:, 2]
+        site_top_z = self.target_site_corners_world[1, 2]
+        # Linear descend shaping: higher reward when object z is lower (even from far away)
+        # Normalized so it's 0 at site_top_z and -1 at 0.3m above; never negative below site_top
+        obj_above_site = (obj_z - site_top_z).clamp(min=0.0)
+        descend_reward_stage4 = -obj_above_site / 0.3  # linear, 0 when at site_top, -1 when 30cm above
+
+        # Reward TCP (arm) moving upward to retract away so object can fall freely
+        tcp_z = self.robot_grasp_pos[:, 2]
+        tcp_above_obj = (tcp_z - obj_z).clamp(min=0.0)  # 0 if tcp below obj (unusual), positive if tcp above
+        retract_reward_stage4 = torch.exp(-tcp_above_obj / 0.1) - 1.0  # 0 when tcp is well above obj, -1 when tcp is at obj
+
+        release_error_stage4 = torch.abs(gripper_action - 1.0)  # +1 = open gripper
+        release_reward_stage4 = torch.exp(-release_error_stage4 / 0.5)
+
+        stage4_reward = stage4_bonus + stage4_mask * (
+            1.0 * descend_reward_stage4 +
+            0.5 * retract_reward_stage4 +
+            0.3 * release_reward_stage4
+        )
 
         pos_delta = torch.norm(self.prev_actions - self.actions, dim=-1)
 
-        reward = (stage0_reward + 
-        stage1_reward + 
-        stage2_reward + 
-        stage3_reward + 
-        stage4_reward + 
+        reward = (stage0_reward +
+        stage1_reward +
+        stage2_reward +
+        stage3_reward +
+        stage4_reward +
         success_reward -
         pos_delta * 0.01
         )
@@ -1893,7 +1909,6 @@ class TestPickItUp(DirectRLEnv):
             "gripper_pos": self._robot.data.joint_pos[:,-1],
             "ascend_diff": ascend_diff,
             "xy_err_site" : xy_err_site,
-            "vel_xy": vel_xy,
             "open_reward": open_reward,
             "close_reward": close_reward,
             "gripper_reward": gripper_reward,
@@ -1909,8 +1924,13 @@ class TestPickItUp(DirectRLEnv):
             "stage0_reward": stage0_reward,
             "stage1_reward": stage1_reward,
             "stage2_reward": stage2_reward,
-            "stage3_reward": stage3_reward,      
-            "stage4_reward": stage4_reward,  
-            "success": success,  
-        }   
+            "stage3_reward": stage3_reward,
+            "stage4_reward": stage4_reward,
+            "descend_reward_stage4": descend_reward_stage4,
+            "retract_reward_stage4": retract_reward_stage4,
+            "release_reward_stage4": release_reward_stage4,
+            "obj_above_site": obj_above_site,
+            "tcp_above_obj": tcp_above_obj,
+            "success": success,
+        }
 
