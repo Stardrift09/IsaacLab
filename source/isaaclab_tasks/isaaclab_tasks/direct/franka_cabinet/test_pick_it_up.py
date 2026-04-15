@@ -59,6 +59,9 @@ class TestPickItUpCfg(DirectRLEnvCfg):
         num_envs=1024, env_spacing=3.0, replicate_physics=True, clone_in_fabric=False, # See if 2048 works
     )
 
+    camera_sensor_record: bool = False
+    start_in_air: bool = False
+
 
     # robot
     robot = ArticulationCfg(
@@ -88,26 +91,26 @@ class TestPickItUpCfg(DirectRLEnvCfg):
             pos=(0.4, 0.0, 0.0),
             rot=(0.0, 0.0, 0.0, 1.0),
         ),
-        actuators={
-            "panda_shoulder": ImplicitActuatorCfg(
-                joint_names_expr=["panda_joint[1-4]"],
-                effort_limit_sim=87.0,
-                stiffness=80.0,
-                damping=4.0,
-            ),
-            "panda_forearm": ImplicitActuatorCfg(
-                joint_names_expr=["panda_joint[5-7]"],
-                effort_limit_sim=12.0,
-                stiffness=80.0,
-                damping=4.0,
-            ),
-            "panda_hand": ImplicitActuatorCfg(
-                joint_names_expr=["panda_finger_joint.*"],
-                effort_limit_sim=20.0, # Reducing from 200, see if this mitigates oscillation
-                stiffness=2e3,
-                damping=1e2,
-            ),
-        },
+            actuators={
+                "panda_shoulder": ImplicitActuatorCfg(
+                    joint_names_expr=["panda_joint[1-4]"],
+                    effort_limit_sim=80.0,
+                    stiffness=1500.0,
+                    damping=200.0,
+                ),
+                "panda_forearm": ImplicitActuatorCfg(
+                    joint_names_expr=["panda_joint[5-7]"],
+                    effort_limit_sim=80.0,
+                    stiffness=1200.0,
+                    damping=180.0,
+                ),
+                "panda_hand": ImplicitActuatorCfg(
+                    joint_names_expr=["panda_finger_joint.*"],
+                    effort_limit_sim=200.0,
+                    stiffness=2e3,
+                    damping=1e2,
+                ),
+            }
     )
 
 
@@ -220,14 +223,14 @@ class TestPickItUp(DirectRLEnv):
         self.discrete_action = True
         self.debug_vis = True
         # Only when debug_vis is true:
-        self.show_robot_grasp=False
+        self.show_robot_grasp=True
         self.show_target_object=False
         self.show_target_grasp_pose=True
 
-        self.camera_sensor_record = False
+        self.camera_sensor_record = cfg.camera_sensor_record
 
         self.log_mine = False
-        self.start_in_air = False
+        self.start_in_air = cfg.start_in_air
         self.root = eureka_root_dir()
         self.target_object_name = "alphabet_soup"
         self.target_site_name = "basket"
@@ -261,7 +264,6 @@ class TestPickItUp(DirectRLEnv):
         episode_length = (max_len - 1) * frequency_ratio + 1
         cfg.episode_length_s = episode_length * cfg.sim.dt * cfg.decimation # handling this dynamically
         
-        # pdb.set_trace()
         self.history_len = 2
         self.num_stages = 5
         self.debug = False  
@@ -479,32 +481,13 @@ class TestPickItUp(DirectRLEnv):
                     64,  69,  85,  89,  77,  71,  74,  69,  64,  65,  70, 101,  72,  80,
                     61,  58,  74,  72,  61,  84,  60,  67], device=self.device)
 
-        # # Repeat/tile until we have at least num_envs elements
-        # repeat_times = (self.num_envs + base.numel() - 1) // base.numel()  # ceiling division
-        # tiled = base.repeat(repeat_times)[:self.num_envs]  # crop to exact length
-
-        # # Add random integers [0,20)
-        # rand_add = torch.randint(low=0, high=21, size=(self.num_envs,), device=self.device)
-
-        # # Final tensor
-        # in_the_air_matrix = tiled + rand_add
-        # self.object_default_state = torch.zeros((self.num_envs, 13), device=self.device)
-        # num_episodes = len(self.episodes)
-        # for i in range(num_episodes):
-        #     # i-th episode gets a column in object_default_state
-        #     # Use modulo if num_envs < num_episodes
-        #     self.object_default_state[:, i % self.object_default_state.shape[1]] = in_the_air_matrix
-
         # Adding a visualizer
         if self.debug_vis:
             self.visualizer = self.define_markers()
             print("Debug visualizer initialized")
 
     def _setup_scene(self):
-        # init_states = self.data['franka'][0]["init_state"] # this is from the first scene as set up. Init states of traj should be updated in reset_idx
-        # init_states = self.data['franka'][0]["states"][100]
-
-        init_states = self.data['franka'][0]["states"][self.start_idx_in_episode] # 92 in the air. Used 100 For two round training, now use 80, starting from ground
+        init_states = self.data['franka'][0]["states"][self.start_idx_in_episode]
         robot_data = init_states['franka'] # seems that joint pos for isaaclab is always positive
         robot_joint_pos = robot_data["dof_pos"]
         # print(f"robot_joint_pos:{robot_joint_pos}")
@@ -560,8 +543,6 @@ class TestPickItUp(DirectRLEnv):
         keys.remove("franka")   # remove the one you don't want
 
         for k in keys:
-            # if k in ["ketchup", "cream_cheese", "tomato_sauce"]:
-            #     self.object_names.remove(k) # remove distractors for now, to be added in later ablations
             if k == self.target_object_name:
                 print(f"target object {k} initial z height: {init_states[k]['pos'][2]}")
                 activate_contact_sensors=True
@@ -569,7 +550,6 @@ class TestPickItUp(DirectRLEnv):
             else:
                 activate_contact_sensors = False
                 debug_vis=False
-            # if k == self.target_object_name or k==self.target_site_name: # Disable other objects for now
             cfg = RigidObjectCfg(
                 prim_path=f"/World/envs/env_.*/{k}",
                 init_state=RigidObjectCfg.InitialStateCfg(
@@ -1150,7 +1130,7 @@ class TestPickItUp(DirectRLEnv):
                
                 if detect_grasp:
                     # update self.robot_grasp_pos
-                    # _,_ = self._get_dones()
+                    _,_ = self._get_dones()
                     # _ = self._get_observations()
                     # for i in range(50):
                     #     writer.add_scalar("Grasp/"+str(i), self.grasped[i], t) 
@@ -1168,24 +1148,23 @@ class TestPickItUp(DirectRLEnv):
                     #                     "always_small": always_small[k], },
                     #                     t)
 
+
                     if t > 20:
                         obj_z = self.target_object.data.root_pos_w[env_ids, 2]  # (num_envs,)
                         in_air = obj_z > 0.1                              # (num_envs,) bool
+                        in_air = self.grasped
                         new_air_envs = torch.nonzero(in_air & (in_the_air_matrix == -1), as_tuple=False).squeeze(-1)
                         in_the_air_matrix[new_air_envs] = t
 
 
-
-                    # if self.target_object.data.root_pos_w[0,2] > 0.1: # check if the grasp is stable (object-hand distance is small) and the object is lifted up (z is large), which should happen at the end of episode when the agent learns to lift up the object while keeping a stable grasp
-                    #     print("logging")
-                    #     for k in range(50):
-                    #         writer.add_scalars("Position_error/"+str(k), 
-                    #                         {"x": diff[k,0], 
-                    #                         "y": diff[k,1], 
-                    #                         "z": diff[k,2], },
-                    #                         t)
-                    #     # print(f"timestep {t}: object in the air")
-                    #     print(self.robot_grasp_rot[0])
+                    # print("logging")
+                    # for k in range(50):
+                    #     writer.add_scalars("Position_error/"+str(k), 
+                    #                     {"x": diff[k,0], 
+                    #                     "y": diff[k,1], 
+                    #                     "z": diff[k,2], },
+                    #                     t)
+                    # print(f"timestep {t}: object in the air")
 
                         
                     # print(diff_norm[0]) # should be small and constant if the grasp is stable, which is the case for most of the episode, except at the end when the object is lifted up and the grasp is broken. This matches with the observation that the agent learns to keep a stable grasp and lift up the object at the end of training.
@@ -1244,7 +1223,47 @@ class TestPickItUp(DirectRLEnv):
             self._reset_idx(env_ids)
 
 
-    def run_single_traj_and_get_vlm_feedback(self, policy_nn, policy, output_dir: str) -> str: 
+    def save_grasped_poses(self, output_dir: str) -> None:
+        """For every env where self.grasped is True, save robot-grasp and object
+        poses in local (env-origin-subtracted) world coordinates to
+        <output_dir>/grasped_poses.npz.
+
+        Arrays in the file (one row per grasped env):
+            env_ids          – int64, which env indices were grasped
+            robot_grasp_pos  – float32 (N,3), TCP position in local coords
+            robot_grasp_rot  – float32 (N,4), TCP orientation (quaternion, unchanged)
+            object_pos       – float32 (N,3), object position in local coords
+            object_rot       – float32 (N,4), object orientation (quaternion, unchanged)
+        """
+        import numpy as np
+
+        grasped_mask = self.grasped  # (num_envs,) bool
+        env_ids = torch.nonzero(grasped_mask, as_tuple=False).squeeze(-1)  # (N,)
+
+        if env_ids.numel() == 0:
+            print("[save_grasped_poses] No grasped environments found – nothing saved.")
+            return
+
+        origins = self.scene.env_origins[env_ids]  # (N,3)
+
+        robot_pos_local = (self.robot_grasp_pos[env_ids] - origins).cpu().numpy()
+        robot_rot       = self.robot_grasp_rot[env_ids].cpu().numpy()
+        object_pos_local = (self.target_object.data.root_pos_w[env_ids] - origins).cpu().numpy()
+        object_rot       = self.target_object.data.root_quat_w[env_ids].cpu().numpy()
+
+        os.makedirs(output_dir, exist_ok=True)
+        out_path = os.path.join(output_dir, "grasped_poses.npz")
+        np.savez(
+            out_path,
+            env_ids=env_ids.cpu().numpy(),
+            robot_grasp_pos=robot_pos_local,
+            robot_grasp_rot=robot_rot,
+            object_pos=object_pos_local,
+            object_rot=object_rot,
+        )
+        print(f"[save_grasped_poses] Saved {env_ids.numel()} grasped poses to {out_path}")
+
+    def run_single_traj_and_get_vlm_feedback(self, policy_nn, policy, output_dir: str) -> str:
         import omni.replicator.core as rep
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)  # creates the directory (and any parent directories if needed)
@@ -1345,20 +1364,12 @@ class TestPickItUp(DirectRLEnv):
         )
         processor = AutoProcessor.from_pretrained("prithivMLmods/DeepCaption-VLA-7B")
         num_samples = 30
-        all_files = sorted([
-            f for f in os.listdir(output_dir)
-            if f.endswith(".png") and f.startswith("rgb_")
-        ])
-        # Extract frame indices from filenames
-        frame_indices = [int(f.split("_")[1]) for f in all_files]
-        # Automatically determine start_index (first frame)
-        start_index = min(frame_indices)
-        # Keep files with frame_index >= start_index
-        all_files = [f for f, idx in zip(all_files, frame_indices) if idx >= start_index]
-
-        # If more files than num_samples, evenly sample without shuffling
+        all_files = sorted(
+            [f for f in os.listdir(output_dir) if f.endswith(".png") and f.startswith("rgb_")],
+            key=lambda f: int(f.split("_")[1]),
+        )
         if len(all_files) > num_samples:
-            indices = np.linspace(0, len(all_files)-1, num_samples, dtype=int)
+            indices = np.linspace(0, len(all_files) - 1, num_samples, dtype=int)
             sampled_files = [all_files[i] for i in indices]
         else:
             sampled_files = all_files
@@ -1411,7 +1422,9 @@ class TestPickItUp(DirectRLEnv):
         if not use_cpu:
             inputs = inputs.to("cuda")
 
-        generated_ids = model.generate(**inputs, max_new_tokens=512)
+        generated_ids = model.generate(
+            **inputs, max_new_tokens=300, repetition_penalty=1.3, no_repeat_ngram_size=3
+        )
         generated_ids_trimmed = [
             out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
         ]

@@ -60,7 +60,7 @@ class FrankaTestPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         num_mini_batches=8,
         learning_rate=5.0e-4,
         schedule="adaptive",
-        gamma=0.99, # 0.9 works 
+        gamma=0.9, # 0.9 works 
         lam=0.95,
         desired_kl=0.008,
         max_grad_norm=1.0,
@@ -90,7 +90,7 @@ class TestPutItInTheBasketPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         num_mini_batches=8,
         learning_rate=5.0e-4,
         schedule="adaptive",
-        gamma=0.99, # 0.9 works for picking up the object already
+        gamma=0.9, # 0.9 works for picking up the object already
         lam=0.95,
         desired_kl=0.008,
         max_grad_norm=1.0,
@@ -120,7 +120,7 @@ class TestPickItUpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         num_mini_batches=8,
         learning_rate=5.0e-4,
         schedule="adaptive",
-        gamma=0.99,
+        gamma=0.9,
         lam=0.95,
         desired_kl=0.008,
         max_grad_norm=1.0,
@@ -149,7 +149,66 @@ class TestStageAsFeedbackPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         num_mini_batches=8,
         learning_rate=5.0e-4,
         schedule="adaptive",
-        gamma=0.99,
+        gamma=0.9,
+        lam=0.95,
+        desired_kl=0.008,
+        max_grad_norm=1.0,
+    )
+
+@configclass
+class PickItUpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    num_steps_per_env = 16
+    max_iterations = 1500
+    save_interval = 50
+    experiment_name = "pick_it_up"
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=True,
+        critic_obs_normalization=True,
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.01,
+        num_learning_epochs=8,
+        num_mini_batches=8,
+        learning_rate=5.0e-4,
+        schedule="adaptive",
+        gamma=0.9,
+        lam=0.95,
+        desired_kl=0.008,
+        max_grad_norm=1.0,
+    )
+
+
+@configclass
+class PlaceInBasketPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    num_steps_per_env = 16
+    max_iterations = 1500
+    save_interval = 50
+    experiment_name = "place_in_basket"
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=True,
+        critic_obs_normalization=True,
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.01,
+        num_learning_epochs=8,
+        num_mini_batches=8,
+        learning_rate=5.0e-4,
+        schedule="adaptive",
+        gamma=0.9,
         lam=0.95,
         desired_kl=0.008,
         max_grad_norm=1.0,
