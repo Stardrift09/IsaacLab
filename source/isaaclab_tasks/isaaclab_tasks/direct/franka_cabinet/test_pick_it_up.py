@@ -418,6 +418,31 @@ class TestPickItUp(DirectRLEnv):
         if self.target_site_radius.item() < 0:
             self.target_site_radius = torch.tensor(0.02)
 
+        # Real-time basket corners — same pattern as target object corners
+        basket_corners_world0 = torch.tensor(
+            [
+                [min_wc[0], min_wc[1], min_wc[2]],
+                [max_wc[0], min_wc[1], min_wc[2]],
+                [min_wc[0], max_wc[1], min_wc[2]],
+                [min_wc[0], min_wc[1], max_wc[2]],
+                [max_wc[0], max_wc[1], min_wc[2]],
+                [max_wc[0], min_wc[1], max_wc[2]],
+                [min_wc[0], max_wc[1], max_wc[2]],
+                [max_wc[0], max_wc[1], max_wc[2]],
+            ],
+            dtype=torch.float32,
+            device=self.device,
+        ).unsqueeze(0)  # [1, 8, 3]
+        basket_quat0_conj = quat_conjugate(self.target_site.data.root_quat_w[0])
+        basket_inv_pos    = -quat_apply(basket_quat0_conj, self.target_site.data.root_pos_w[0])
+        local_basket_corners0 = transform_points(
+            points=basket_corners_world0,
+            pos=basket_inv_pos,
+            quat=basket_quat0_conj,
+        ).squeeze(0)  # [8, 3]
+        self.local_basket_corners_init = local_basket_corners0.unsqueeze(0).repeat(self.num_envs, 1, 1)  # [num_envs, 8, 3]
+        self.basket_corners_world = torch.zeros_like(self.local_basket_corners_init)  # [num_envs, 8, 3]
+
         hand_pose = get_env_local_pose(
             self.scene.env_origins[0],
             UsdGeom.Xformable(stage.GetPrimAtPath("/World/envs/env_0/Robot/panda_link7")),
@@ -476,10 +501,16 @@ class TestPickItUp(DirectRLEnv):
 
         # # Specific to in the air task, randomize the initialization
         self.update_rate = 0
+        # this is probably from height 0.1
         self.base = torch.tensor([ 91,  66,  67, 110,  66,  84, 106,  81,  54,  83,  72,  63,  68,  63,
                     57,  58,  72,  84,  76,  72,  62,  63,  85,  70,  72,  60,  68,  70,
                     64,  69,  85,  89,  77,  71,  74,  69,  64,  65,  70, 101,  72,  80,
                     61,  58,  74,  72,  61,  84,  60,  67], device=self.device)
+        # This is from height 0.055
+        self.base_0055 = torch.tensor([ 55,  59,  60, 101,  59,  74,  52,  53,  49,  74,  62,  56,  61,  56,
+                    49,  52,  63,  75,  65,  66,  45,  53,  56,  56,  66,  50,  57,  62,
+                    53,  61,  45,  80,  67,  62,  67,  62,  55,  59,  61,  48,  66,  58,
+                    54,  50,  68,  61,  53,  52,  50,  39], device=self.device)
 
         # Adding a visualizer
         if self.debug_vis:
@@ -663,7 +694,12 @@ class TestPickItUp(DirectRLEnv):
         self._update_past_relative_dist()
 
         # condition for termination: for dropping the object in the basket
-        self.low_enough = self.target_object.data.root_pos_w[:, 2] <self.target_site_corners_world[1,2] # change the harded coded height
+        obj_z = self.target_object.data.root_pos_w[:, 2]
+        basket_z        = self.basket_corners_world[:, :, 2]      # [num_envs, 8]
+        basket_bottom_z = basket_z.min(dim=1).values              # [num_envs]
+        basket_top_z    = basket_z.max(dim=1).values              # [num_envs]
+        self.low_enough  = obj_z < basket_top_z                   # object center below basket rim
+        self.high_enough_for_basket = obj_z > basket_bottom_z     # object center above basket floor
         obj_xy = self.target_object.data.root_pos_w[:, :2]
         site_pos = self.target_site.data.root_pos_w[:, :2]
         dist2 = ((obj_xy - site_pos)**2).sum(dim=-1)
@@ -686,13 +722,13 @@ class TestPickItUp(DirectRLEnv):
         self.small_rotation = angle_error < 0.8
 
         lowest_z_object= self._get_target_object_lowest_points()
-        self.high_enough = lowest_z_object > self.target_site_corners_world[1,2] + 0.02
+        self.high_enough = lowest_z_object > basket_top_z + 0.02
         # terminated = self.high_enough & self.grasped
-        terminated = self.inside_site & self.low_enough
-
-        # print(f"small_rotation{small_rotation}")
-        # print(f"high_enough{high_enough}")
-        # print(f"grasped{grasped}")
+        terminated = self.inside_site & self.low_enough & self.high_enough_for_basket
+        
+        # print(f"self.inside_site{self.inside_site}")
+        # print(f"self.high_enough_for_basket{self.high_enough_for_basket}")
+        # print(f"self.low_enough{self.low_enough}")
         truncated = self.episode_length_buf >= self.max_episode_length - 1
         # terminated_count = high_enough.sum().item()
         # truncated_count = truncated.sum().item()
@@ -758,7 +794,7 @@ class TestPickItUp(DirectRLEnv):
         # update default root states for random initialization
         rand_episode_idx = torch.randint(low=0, high=50, size=(1,), device=self.device).item()
         if self.start_in_air:
-            start_idx_in_episode = self.base[rand_episode_idx]
+            start_idx_in_episode = self.base_0055[rand_episode_idx]
         else:
             start_idx_in_episode = 0
         rand_int = torch.randint(low=0, high=21, size=(1,), device=self.device).item()
@@ -1131,28 +1167,17 @@ class TestPickItUp(DirectRLEnv):
                 if detect_grasp:
                     # update self.robot_grasp_pos
                     _,_ = self._get_dones()
-                    # _ = self._get_observations()
+                    _ = self._get_observations()
                     # for i in range(50):
                     #     writer.add_scalar("Grasp/"+str(i), self.grasped[i], t) 
                     diff = self.target_object.data.body_pos_w.squeeze(1) - self.robot_grasp_pos
                     # print(diff[0]) # play the first episode to check the constant object-hand distance
                     diff_norm = torch.norm(diff, dim=-1)  # shape: (n,)
                     # 0.09 ketchup/ 0.03 cream_cheese 0.1 alphabet_soup
-                    # stable_left_contact, stable_right_contact, stable_opposing_contact, always_small = self._grasp_detection()
-                    # for k in range(50):
-                    #     writer.add_scalars("grasp/"+str(k), 
-                    #                     {
-                    #                     "stable_left_contact": stable_left_contact[k], 
-                    #                     "stable_right_contact": stable_right_contact[k], 
-                    #                     "stable_opposing_contact": stable_opposing_contact[k], 
-                    #                     "always_small": always_small[k], },
-                    #                     t)
-
 
                     if t > 20:
                         obj_z = self.target_object.data.root_pos_w[env_ids, 2]  # (num_envs,)
-                        in_air = obj_z > 0.1                              # (num_envs,) bool
-                        in_air = self.grasped
+                        in_air = obj_z > 0.055                             # (num_envs,) bool
                         new_air_envs = torch.nonzero(in_air & (in_the_air_matrix == -1), as_tuple=False).squeeze(-1)
                         in_the_air_matrix[new_air_envs] = t
 
@@ -1222,6 +1247,7 @@ class TestPickItUp(DirectRLEnv):
                     #         writer.add_scalar("Replay/"+k, eureka_episode_sums[k].mean().item(), t)                        
             self._reset_idx(env_ids)
 
+        print("Replay finished.")
 
     def save_grasped_poses(self, output_dir: str) -> None:
         """For every env where self.grasped is True, save robot-grasp and object
@@ -1447,7 +1473,8 @@ class TestPickItUp(DirectRLEnv):
             env_ids = self._robot._ALL_INDICES
         self._compute_robot_intermediate_values(env_ids)
         self._compute_target_object_corners(env_ids)
-        
+        self._compute_basket_corners(env_ids)
+
         # self._compute_manipulability(env_ids) # This is only needed for reward computatoin
 
 
@@ -1467,7 +1494,16 @@ class TestPickItUp(DirectRLEnv):
         self.local_centers[env_ids] = transform_points(points=self.local_centers_init[env_ids],
                                               pos=pos,
                                               quat=quat)
-        
+
+    def _compute_basket_corners(self, env_ids: torch.Tensor):
+        pos  = self.target_site.data.root_pos_w[env_ids]
+        quat = quat_conjugate(self.target_site.data.root_quat_w[env_ids])
+        self.basket_corners_world[env_ids] = transform_points(
+            points=self.local_basket_corners_init[env_ids],
+            pos=pos,
+            quat=quat,
+        )
+
     def _update_past_relative_dist(self, env_ids: torch.Tensor | None = None):
         if env_ids is None:
             env_ids = self._robot._ALL_INDICES
@@ -1875,7 +1911,7 @@ class TestPickItUp(DirectRLEnv):
 
 
 
-        success = self.inside_site & self.low_enough
+        success = self.inside_site & self.low_enough & self.high_enough_for_basket
         success_reward = 16 * 40 * success
 
         # Stage 4: inside site -> retract arm up and release gripper so object drops into basket
