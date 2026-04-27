@@ -34,6 +34,7 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument("--stochastic", action="store_true", default=False, help="Use sampled actions instead of mean (matches training behavior).")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -148,7 +149,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     runner.load(resume_path,map_location=agent_cfg.device)
 
     # obtain the trained policy for inference
-    policy = runner.get_inference_policy(device=env.unwrapped.device)
+    if args_cli.stochastic:
+        policy = lambda obs: runner.alg.policy.act(obs)
+    else:
+        policy = runner.get_inference_policy(device=env.unwrapped.device)
 
     # extract the neural network module
     # we do this in a try-except to maintain backwards compatibility.

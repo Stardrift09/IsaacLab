@@ -17,22 +17,17 @@ from . import agents
 task_dict = { # Using the same config, manually set
     "TestStageAsFeedback": "test_stage_as_feedback",
     "TestPickItUp": "test_pick_it_up",
+    "TestCollideAndPlace": "test_collide_and_place",
+    "TestSlightCollideAndPlace": "test_collide_and_place",
     "ControlTargetPosManually": "control_target_pos_manually",
+    "TurnOnTheStove": "turn_on_the_stove",
+    "PickItUp": "pick_it_up",
+    "PlaceInBasket": "place_in_basket",
+    "PickItUpNoGrasp": "pick_it_up_no_grasp",
+    "PickItUpNoGraspGamma99": "pick_it_up_no_grasp_gamma99",
 }
 
-# Two-stage curriculum: pick up, then place in basket
-for task_name, module_name in [("PickItUp", "pick_it_up"), ("PlaceInBasket", "place_in_basket")]:
-    gym.register(
-        id=task_name,
-        entry_point=f"{__name__}.{module_name}:{task_name}",
-        disable_env_checker=True,
-        kwargs={
-            "env_cfg_entry_point": f"{__name__}.{module_name}:{task_name}Cfg",
-            "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
-            "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:{task_name}PPORunnerCfg",
-            "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
-        },
-    )
+
 for k, v in task_dict.items():
     gym.register(
         id=k,

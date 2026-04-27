@@ -1,0 +1,158 @@
+##
+# Headless kit + MJCF importer extension for asset conversion
+# Extends isaaclab.python.headless.kit with isaacsim.asset.importer.mjcf
+##
+
+[package]
+title = "Isaac Lab Python Headless (MJCF)"
+description = "Headless app for MJCF to USD conversion"
+version = "2.3.0"
+keywords = ["experience", "app", "isaaclab", "python", "headless"]
+
+[settings]
+app.versionFile = "${exe-path}/VERSION"
+app.folder = "${exe-path}/"
+app.name = "Isaac-Sim"
+app.version = "5.1.0"
+
+[dependencies]
+"omni.physx" = {}
+"omni.physx.tensors" = {}
+"omni.physx.fabric" = {}
+"omni.warp.core" = {}
+"usdrt.scenegraph" = {}
+"omni.kit.telemetry" = {}
+"omni.kit.loop" = {}
+"omni.kit.usd.mdl" = {}
+"omni.usd.metrics.assembler.ui" = {}
+
+# MJCF importer — the only addition over the standard headless kit
+"isaacsim.asset.importer.mjcf" = {}
+
+[settings]
+app.content.emptyStageOnStart = false
+app.enableStdoutOutput = false
+app.runLoops.rendering_0.fillResolution = false
+exts."omni.kit.window.viewport".blockingGetViewportDrawable = false
+exts."omni.kit.widget.toolbar".PlayButton.enabled = false
+exts."omni.replicator.core".Orchestrator.enabled = false
+
+[settings.app.settings]
+persistent = true
+dev_build = false
+fabricDefaultStageFrameHistoryCount = 3
+
+[settings.app.python]
+interceptSysStdOutput = false
+logSysStdOutput = false
+
+[settings]
+renderer.multiGpu.enabled = true
+renderer.multiGpu.autoEnable = true
+'rtx-transient'.resourcemanager.enableTextureStreaming = true
+app.asyncRendering = false
+app.asyncRenderingLowLatency = false
+app.hydraEngine.waitIdle = false
+omni.replicator.asyncRendering = false
+app.useFabricSceneDelegate = false
+renderer.enabled = "rtx"
+app.audio.enabled = false
+app.vulkan = true
+app.profilerBackend = "nvtx"
+app.runLoops.main.rateLimitEnabled = false
+exts."omni.kit.window.extensions".hideNonToggleableExts = true
+exts."omni.kit.window.extensions".showFeatureOnly = false
+isaac.startup.ros_bridge_extension = ""
+metricsAssembler.changeListenerEnabled = false
+
+[settings.exts."omni.kit.registry.nucleus"]
+registries = [
+    { name = "kit/default", url = "https://ovextensionsprod.blob.core.windows.net/exts/kit/prod/107/shared" },
+    { name = "kit/sdk", url = "https://ovextensionsprod.blob.core.windows.net/exts/kit/prod/sdk/${kit_version_short}/${kit_git_hash}" },
+    { name = "kit/community", url = "https://dw290v42wisod.cloudfront.net/exts/kit/community" },
+]
+
+[settings.app.extensions]
+skipPublishVerification = false
+registryEnabled = true
+
+[settings.crashreporter.data]
+experience = "Isaac Sim"
+
+[settings.persistent]
+app.file.recentFiles = []
+app.stage.upAxis = "Z"
+app.stage.movePrimInPlace = false
+app.stage.instanceableOnCreatingReference = false
+app.stage.materialStrength = "weakerThanDescendants"
+app.transform.gizmoUseSRT = true
+app.viewport.grid.scale = 1.0
+app.viewport.pickingMode = "kind:model.ALL"
+app.viewport.camMoveVelocity = 0.05
+app.viewport.gizmo.scale = 0.01
+app.viewport.previewOnPeek = false
+app.viewport.snapToSurface = false
+app.viewport.displayOptions = 31951
+app.window.uiStyle = "NvidiaDark"
+app.primCreation.DefaultXformOpType = "Scale, Orient, Translate"
+app.primCreation.DefaultXformOpOrder = "xformOp:translate, xformOp:orient, xformOp:scale"
+app.primCreation.typedDefaults.camera.clippingRange = [0.01, 10000000.0]
+simulation.minFrameRate = 15
+simulation.defaultMetersPerUnit = 1.0
+omnigraph.updateToUsd = false
+omnigraph.useSchemaPrims = true
+omnigraph.disablePrimNodes = true
+omni.replicator.captureOnPlay = true
+omnihydra.useSceneGraphInstancing = true
+renderer.startupMessageDisplayed = true
+
+[settings.physics]
+updateToUsd = false
+updateParticlesToUsd = false
+updateVelocitiesToUsd = false
+updateForceSensorsToUsd = false
+outputVelocitiesLocalSpace = false
+useFastCache = false
+visualizationDisplayJoints = false
+fabricUpdateTransformations = false
+fabricUpdateVelocities = false
+fabricUpdateForceSensors = false
+fabricUpdateJointStates = false
+fabricUseGPUInterop = true
+resourcemonitor.timeBetweenQueries = 100
+
+[settings.app.exts]
+folders = [
+    "${exe-path}/exts",
+    "${exe-path}/extscore",
+    "${exe-path}/../exts",
+    "${exe-path}/../extsDeprecated",
+    "${exe-path}/../extscache",
+    "${exe-path}/../extsPhysics",
+    "${exe-path}/../isaacsim/exts",
+    "${exe-path}/../isaacsim/extsDeprecated",
+    "${exe-path}/../isaacsim/extscache",
+    "${exe-path}/../isaacsim/extsPhysics",
+    "${app}",
+    "${app}/../source",
+]
+
+[settings.ngx]
+enabled = true
+
+[dependencies]
+"isaacsim.simulation_app" = {}
+"isaacsim.core.api" = {}
+"isaacsim.core.cloner" = {}
+"isaacsim.core.utils" = {}
+"isaacsim.core.version" = {}
+"isaaclab" = {order = 1000}
+"isaaclab_assets" = {order = 1000}
+"isaaclab_tasks" = {order = 1000}
+"isaaclab_mimic" = {order = 1000}
+"isaaclab_rl" = {order = 1000}
+
+[settings]
+persistent.isaac.asset_root.default = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1"
+persistent.isaac.asset_root.cloud = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1"
+persistent.isaac.asset_root.nvidia = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1"

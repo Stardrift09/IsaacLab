@@ -33,7 +33,7 @@ import numpy as np
 from isaaclab_eureka.utils import eureka_root_dir, read_pkl
 
 @configclass
-class TestPickItUpCfg(DirectRLEnvCfg):
+class TurnOnTheStoveCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 8.65  # 519 timesteps
     decimation = 2
@@ -134,65 +134,6 @@ class TestPickItUpCfg(DirectRLEnvCfg):
     # rotate around x rot=[0.7071, 0.7071, 0, 0]
     # rotate around y rot=[0.7071, 0, 0.7071, 0]
 
-    ketchup = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/ketchup",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.3, 0, 0], rot=[0.7071, 0.7071, 0, 0]),
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/ketchup/usd/ketchup.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                articulation_enabled=False
-            )
-        ),  
-    )
-
-    basket = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/basket",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[0, 0, 0], rot=[0, 0, 0, 1]),
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/basket/usd/basket.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                articulation_enabled=False
-            )
-        ),
-    )
-
-    cream_cheese = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/alphabet_soup",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.2, 0.3, 0], rot=[0.7071, 0.7071, 0, 0]),
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/alphabet_soup/usd/alphabet_soup.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                articulation_enabled=False
-            )
-        ),
-    )
-
-    alphabet_soup = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/cream_cheese",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[0, 0.5, 0], rot=[0.7071, 0.7071, 0, 0]),
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/cream_cheese/usd/cream_cheese.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                articulation_enabled=False
-            )
-        ),
-    )
-
-    tomato_sauce = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/tomato_sauce",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.2, 0.5, 0], rot=[0.7071, 0.7071, 0, 0]),
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/tomato_sauce/usd/tomato_sauce.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                articulation_enabled=False
-            )
-        ),
-    )
 
     action_scale = 7.5 # 7.5 originally
     dof_velocity_scale = 0.1
@@ -205,7 +146,7 @@ class TestPickItUpCfg(DirectRLEnvCfg):
     finger_reward_scale = 2.0
 
 
-class TestPickItUp(DirectRLEnv):
+class TurnOnTheStove(DirectRLEnv):
     # pre-physics step calls
     #   |-- _pre_physics_step(action)
     #   |-- _apply_action()
@@ -215,9 +156,9 @@ class TestPickItUp(DirectRLEnv):
     #   |-- _reset_idx(env_ids)
     #   |-- _get_observations()
 
-    cfg: TestPickItUpCfg
+    cfg: TurnOnTheStoveCfg
 
-    def __init__(self, cfg: TestPickItUpCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: TurnOnTheStoveCfg, render_mode: str | None = None, **kwargs):
         seed = cfg.seed
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
@@ -240,7 +181,7 @@ class TestPickItUp(DirectRLEnv):
         self.input_direction = 2 # z axis
         if self.input_direction != 2:
             raise NotImplementedError("Change the _get_dones method and other calculations for deciding the entry size")
-        self.path = f"{self.root}/libero/trajs/libero90/libero_90_living_room_scene1_pick_up_the_{self.target_object_name}_and_put_it_in_the_basket_traj_v2.pkl"
+        self.path = f"{self.root}/libero/trajs/libero90/libero_90_kitchen_scene3_turn_on_the_stove_traj_v2.pkl"
         if self.log_mine:
             import os
             log_dir = os.path.join(self.root, "logs", "replay_test")
@@ -573,40 +514,69 @@ class TestPickItUp(DirectRLEnv):
 
         #TODO: for the rest: consider if the task has articulation
         self.rigid_objects = {}
+        self.articulations = {}
         keys = list(init_states.keys())
         keys.remove("franka")   # remove the one you don't want
-
         for k in keys:
-            if k == self.target_object_name:
-                print(f"target object {k} initial z height: {init_states[k]['pos'][2]}")
-                activate_contact_sensors=True
-                debug_vis=True
-            else:
-                activate_contact_sensors = False
-                debug_vis=False
-            cfg = RigidObjectCfg(
-                prim_path=f"/World/envs/env_.*/{k}",
-                init_state=RigidObjectCfg.InitialStateCfg(
-                    pos=init_states[k]["pos"],
-                    rot=init_states[k]["rot"],
-                ),
-                debug_vis=debug_vis,
-                spawn=sim_utils.UsdFileCfg(
-                    usd_path=f"{self.root}/libero/COMMON/stable_hope_objects/{k}/usd/{k}.usd",
-                    activate_contact_sensors=activate_contact_sensors,
-                    rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-                    articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                        articulation_enabled=False
-                    )
-                ),  
-            )
-            object = RigidObject(cfg)
-            self.rigid_objects[k] = object
-            self.scene.rigid_objects[k] = object # can I directly assign the dict?
+            if k == "flat_stove":
+                cfg = cfg = ArticulationCfg(
+                    prim_path="/World/envs/env_.*/Stove",
+                    spawn=sim_utils.UsdFileCfg(
+                        usd_path=f"{self.root}/libero/COMMON/articulated_objects/flat_stove/usd/flat_stove_urdf.usd",
+                        activate_contact_sensors=False,
+                    ),
+                    init_state=ArticulationCfg.InitialStateCfg(
+                        pos=(0.0, 0.0, 0.4),
+                        rot=(1.0, 0.0, 0.0, 0.0),
+                        joint_pos={
+                            "button_joint": 0.0,
+                        },
+                    ),
+                    actuators={
+                        "knob": ImplicitActuatorCfg(
+                            joint_names_expr=["button_joint"],
+                            effort_limit_sim=1000.0,
+                            stiffness=0.0,
+                            damping=1.0,
+                        ),
+                    },
+                )
+                articulation = Articulation(cfg)
+                self.articulations[k] = articulation
+                self.scene.articulations[k] = articulation # can I directly assign the dict?
+
+        pdb.set_trace()
+        # for k in keys:
+        #     if k == self.target_object_name:
+        #         print(f"target object {k} initial z height: {init_states[k]['pos'][2]}")
+        #         activate_contact_sensors=True
+        #         debug_vis=True
+        #     else:
+        #         activate_contact_sensors = False
+        #         debug_vis=False
+        #     cfg = RigidObjectCfg(
+        #         prim_path=f"/World/envs/env_.*/{k}",
+        #         init_state=RigidObjectCfg.InitialStateCfg(
+        #             pos=init_states[k]["pos"],
+        #             rot=init_states[k]["rot"],
+        #         ),
+        #         debug_vis=debug_vis,
+        #         spawn=sim_utils.UsdFileCfg(
+        #             usd_path=f"{self.root}/libero/COMMON/stable_hope_objects/{k}/usd/{k}.usd",
+        #             activate_contact_sensors=activate_contact_sensors,
+        #             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+        #             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+        #                 articulation_enabled=False
+        #             )
+        #         ),  
+        #     )
+        #     object = RigidObject(cfg)
+        #     self.rigid_objects[k] = object
+        #     self.scene.rigid_objects[k] = object # can I directly assign the dict?
 
 
-        self.target_object : RigidObject = self.rigid_objects[self.target_object_name]
-        self.target_site = self.rigid_objects[self.target_site_name]
+        # self.target_object : RigidObject = self.rigid_objects[self.target_object_name]
+        # self.target_site = self.rigid_objects[self.target_site_name]
 
         if self.camera_sensor_record:
             self.define_camera() # Single camera, should not be added to the scene
