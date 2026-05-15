@@ -1952,3 +1952,43 @@ class TestCollideAndPlace(DirectRLEnv):
 
         return reward, individual_rewards_dict
 
+
+@configclass
+class TestSlightCollideAndPlaceCfg(TestCollideAndPlaceCfg):
+    collision_max_displacement: float = 0.2  # metres; collision object must not be pushed beyond this
+
+
+class TestSlightCollideAndPlace(TestCollideAndPlace):
+    """Full task: slight collision (≤ 0.2 m) + place in basket."""
+
+    cfg: TestSlightCollideAndPlaceCfg
+
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        terminated, truncated = super()._get_dones()
+        collision_displacement = torch.norm(
+            self.collision_obj_pos - self.collision_object_init_pos, dim=-1
+        )
+        collision_not_too_hard = collision_displacement <= self.cfg.collision_max_displacement
+        return terminated & collision_not_too_hard, truncated
+
+
+@configclass
+class TestSlightCollideCfg(TestSlightCollideAndPlaceCfg):
+    collision_stop_vel_threshold: float = 0.02  # m/s; collision object must be nearly stopped
+
+
+class TestSlightCollide(TestSlightCollideAndPlace):
+    """Stage 1: terminate when a gentle collision is triggered and the collision object has come to rest."""
+
+    cfg: TestSlightCollideCfg
+
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        _, truncated = TestCollideAndPlace._get_dones(self)
+        collision_displacement = torch.norm(
+            self.collision_obj_pos - self.collision_object_init_pos, dim=-1
+        )
+        collision_not_too_hard = collision_displacement <= self.cfg.collision_max_displacement
+        collision_obj_vel = torch.norm(self.collision_object.data.root_lin_vel_w, dim=-1)
+        collision_obj_stopped = collision_obj_vel < self.cfg.collision_stop_vel_threshold
+        terminated = self.collision_triggered & collision_not_too_hard & collision_obj_stopped
+        return terminated, truncated

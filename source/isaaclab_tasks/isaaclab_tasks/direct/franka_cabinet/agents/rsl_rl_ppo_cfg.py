@@ -158,6 +158,36 @@ class TestSlightCollideAndPlacePPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
 
 @configclass
+class TestSlightCollidePPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    num_steps_per_env = 16
+    max_iterations = 1500
+    save_interval = 50
+    experiment_name = "test_slight_collide"
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=True,
+        critic_obs_normalization=True,
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.01,
+        num_learning_epochs=8,
+        num_mini_batches=8,
+        learning_rate=5.0e-4,
+        schedule="adaptive",
+        gamma=0.9,
+        lam=0.95,
+        desired_kl=0.008,
+        max_grad_norm=1.0,
+    )
+
+
+@configclass
 class TestPickItUpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 16
     max_iterations = 1500
@@ -275,6 +305,126 @@ class PlaceInBasketPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     )
 
 @configclass
+class PlaceInBasketUprightPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    num_steps_per_env = 16
+    max_iterations = 1500
+    save_interval = 50
+    experiment_name = "place_in_basket_upright"
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=True,
+        critic_obs_normalization=True,
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.01,
+        num_learning_epochs=8,
+        num_mini_batches=8,
+        learning_rate=5.0e-4,
+        schedule="adaptive",
+        gamma=0.9,
+        lam=0.95,
+        desired_kl=0.008,
+        max_grad_norm=1.0,
+    )
+
+
+@configclass
+class PlaceInBasketDropPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    num_steps_per_env = 16
+    max_iterations = 1500
+    save_interval = 50
+    experiment_name = "place_in_basket_drop"
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=True,
+        critic_obs_normalization=True,
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.01,
+        num_learning_epochs=8,
+        num_mini_batches=8,
+        learning_rate=5.0e-4,
+        schedule="adaptive",
+        gamma=0.9,
+        lam=0.95,
+        desired_kl=0.008,
+        max_grad_norm=1.0,
+    )
+
+
+@configclass
+class PlaceInBasketDropNoGraspPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    num_steps_per_env = 16
+    max_iterations = 1500
+    save_interval = 50
+    experiment_name = "place_in_basket_drop_no_grasp"
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=True,
+        critic_obs_normalization=True,
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.01,
+        num_learning_epochs=8,
+        num_mini_batches=8,
+        learning_rate=5.0e-4,
+        schedule="adaptive",
+        gamma=0.9,
+        lam=0.95,
+        desired_kl=0.008,
+        max_grad_norm=1.0,
+    )
+
+
+@configclass
+class PlaceInBasketNoGraspPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    num_steps_per_env = 16
+    max_iterations = 1500
+    save_interval = 50
+    experiment_name = "place_in_basket_no_grasp"
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=True,
+        critic_obs_normalization=True,
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.01,
+        num_learning_epochs=8,
+        num_mini_batches=8,
+        learning_rate=5.0e-4,
+        schedule="adaptive",
+        gamma=0.9,
+        lam=0.95,
+        desired_kl=0.008,
+        max_grad_norm=1.0,
+    )
+
+
+@configclass
 class PickItUpNoGraspPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 16
     max_iterations = 1500
@@ -328,6 +478,36 @@ class PickItUpNoGraspGamma99PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         learning_rate=5.0e-4,
         schedule="adaptive",
         gamma=0.99,
+        lam=0.95,
+        desired_kl=0.008,
+        max_grad_norm=1.0,
+    )
+
+
+@configclass
+class OpenTheMicrowavePPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    num_steps_per_env = 16
+    max_iterations = 1500
+    save_interval = 50
+    experiment_name = "open_the_microwave"
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=True,
+        critic_obs_normalization=True,
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.01,
+        num_learning_epochs=8,
+        num_mini_batches=8,
+        learning_rate=5.0e-4,
+        schedule="adaptive",
+        gamma=0.9,
         lam=0.95,
         desired_kl=0.008,
         max_grad_norm=1.0,

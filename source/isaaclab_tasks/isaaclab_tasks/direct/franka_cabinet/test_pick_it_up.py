@@ -501,6 +501,7 @@ class TestPickItUp(DirectRLEnv):
         self.small_rotation = torch.zeros((self.num_envs), device=self.device, dtype=bool)
         self.low_enough = torch.zeros((self.num_envs), device=self.device, dtype=bool)
         self.inside_site = torch.zeros((self.num_envs), device=self.device, dtype=bool)
+        self.grasped_and_lifted = torch.zeros((self.num_envs), device=self.device, dtype=bool)
 
         # # Specific to in the air task, randomize the initialization
         self.update_rate = 0
@@ -726,8 +727,8 @@ class TestPickItUp(DirectRLEnv):
 
         lowest_z_object= self._get_target_object_lowest_points()
         self.high_enough = lowest_z_object > basket_top_z + 0.02
-        # terminated = self.high_enough & self.grasped
-        terminated = self.inside_site & self.low_enough & self.high_enough_for_basket
+        self.grasped_and_lifted |= self.grasped & self.high_enough
+        terminated = self.inside_site & self.low_enough & self.high_enough_for_basket & self.grasped_and_lifted
         
         # print(f"self.inside_site{self.inside_site}")
         # print(f"self.high_enough_for_basket{self.high_enough_for_basket}")
@@ -795,32 +796,44 @@ class TestPickItUp(DirectRLEnv):
         self.update_rate += 1
         # if self.update_rate%2 == 0:
         # update default root states for random initialization
-        rand_episode_idx = torch.randint(low=0, high=50, size=(1,), device=self.device).item()
-        if self.start_in_air:
-            start_idx_in_episode = self.base_0055[rand_episode_idx]
-        else:
-            start_idx_in_episode = 0
-        rand_int = torch.randint(low=0, high=21, size=(1,), device=self.device).item()
-        idx = start_idx_in_episode + rand_int
-        # print(idx)
-        # print(len(self.data['franka'][rand_episode_idx]["states"]))
-        init_states = self.data['franka'][rand_episode_idx]["states"][idx]
-        robot_data = init_states['franka'] # seems that joint pos for isaaclab is always positive
-        robot_joint_pos = robot_data["dof_pos"]
-        # print(f"robot_joint_pos:{robot_joint_pos}")
-        robot_joint_pos['panda_finger_joint2'] = robot_joint_pos['panda_finger_joint1']
-        # print(f"robot_joint_pos:{robot_joint_pos}")
-        robot_joint_pos = {k: v.item() for k, v in robot_joint_pos.items()}
-        joint_values = torch.tensor(list(robot_joint_pos.values()), device=self.device)
-        self._robot.data.default_joint_pos[env_ids] = joint_values
+        # Sample independent episode and frame per env for training diversity
+        n = len(env_ids)
+        rand_ep_indices = torch.randint(low=0, high=50, size=(n,), device=self.device)
+        rand_frame_offsets = torch.randint(low=0, high=21, size=(n,), device=self.device)
+
+        joint_values_list, robot_base_pos_list, robot_base_quat_list = [], [], []
+        target_obj_pos_list, target_obj_rot_list = [], []
+        obj_pos_lists = {name: [] for name in self.object_names}
+        obj_rot_lists = {name: [] for name in self.object_names}
+
+        for i in range(n):
+            ep_idx = rand_ep_indices[i].item()
+            start_idx = int(self.base_0055[ep_idx].item()) if self.start_in_air else 0
+            frame_idx = start_idx + rand_frame_offsets[i].item()
+            states = self.data['franka'][ep_idx]["states"][frame_idx]
+            robot_data = states['franka']
+            jpos = dict(robot_data["dof_pos"])
+            jpos['panda_finger_joint2'] = jpos['panda_finger_joint1']
+            joint_values_list.append(torch.tensor([v.item() for v in jpos.values()], device=self.device))
+            robot_base_pos_list.append(torch.tensor(robot_data["pos"], dtype=torch.float32, device=self.device))
+            robot_base_quat_list.append(torch.tensor(robot_data["rot"], dtype=torch.float32, device=self.device))
+            for obj_name in self.object_names:
+                obj_pos_lists[obj_name].append(torch.tensor(states[obj_name]["pos"], dtype=torch.float32, device=self.device))
+                obj_rot_lists[obj_name].append(torch.tensor(states[obj_name]["rot"], dtype=torch.float32, device=self.device))
+            target_obj_pos_list.append(torch.tensor(states[self.target_object_name]["pos"], dtype=torch.float32, device=self.device))
+            target_obj_rot_list.append(torch.tensor(states[self.target_object_name]["rot"], dtype=torch.float32, device=self.device))
+
+        joint_values_batch    = torch.stack(joint_values_list)       # [n, num_joints]
+        robot_base_pos_batch  = torch.stack(robot_base_pos_list)     # [n, 3]
+        robot_base_quat_batch = torch.stack(robot_base_quat_list)    # [n, 4]
+        target_obj_pos_batch  = torch.stack(target_obj_pos_list)     # [n, 3]
+        target_obj_rot_batch  = torch.stack(target_obj_rot_list)     # [n, 4]
+
+        self._robot.data.default_joint_pos[env_ids] = joint_values_batch
 
         for object_name in self.object_names:
-            object = self.rigid_objects[object_name]
-            pos = torch.tensor(init_states[object_name]["pos"], device=self.device)
-            rot = torch.tensor(init_states[object_name]["rot"], device=self.device)
-
-            object.data.default_root_state[env_ids, 0:3] = pos
-            object.data.default_root_state[env_ids, 3:7] = rot
+            self.rigid_objects[object_name].data.default_root_state[env_ids, 0:3] = torch.stack(obj_pos_lists[object_name])
+            self.rigid_objects[object_name].data.default_root_state[env_ids, 3:7] = torch.stack(obj_rot_lists[object_name])
 
         # robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids] # TODO: recover randomization and test
@@ -830,16 +843,9 @@ class TestPickItUp(DirectRLEnv):
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
 
         if self.randomize_init:
-            base_quat = torch.tensor(
-                robot_data["rot"], dtype=torch.float32, device=self.device
-            ).unsqueeze(0).expand(len(env_ids), -1)
-            demo_base_pos_local = torch.tensor(
-                robot_data["pos"], dtype=torch.float32, device=self.device
-            ).unsqueeze(0).expand(len(env_ids), -1)
-
-            # Ensure robot base is at demo position (no XY noise)
+            # Ensure robot base is at per-env demo position (no XY noise)
             self._robot.write_root_pose_to_sim(
-                torch.cat([demo_base_pos_local + self.scene.env_origins[env_ids], base_quat], dim=-1),
+                torch.cat([robot_base_pos_batch + self.scene.env_origins[env_ids], robot_base_quat_batch], dim=-1),
                 env_ids=env_ids,
             )
 
@@ -857,16 +863,9 @@ class TestPickItUp(DirectRLEnv):
                     self.robot_local_grasp_rot[env_ids], self.robot_local_grasp_pos[env_ids],
                 )
 
-                # Demo object pose in world frame
-                obj_pos_d = (
-                    torch.tensor(
-                        init_states[self.target_object_name]["pos"], dtype=torch.float32, device=self.device
-                    ).unsqueeze(0).expand(len(env_ids), -1)
-                    + self.scene.env_origins[env_ids]
-                )
-                obj_rot_d = torch.tensor(
-                    init_states[self.target_object_name]["rot"], dtype=torch.float32, device=self.device
-                ).unsqueeze(0).expand(len(env_ids), -1)
+                # Demo object pose in world frame (per-env)
+                obj_pos_d = target_obj_pos_batch + self.scene.env_origins[env_ids]
+                obj_rot_d = target_obj_rot_batch
 
                 # Express object in grasp frame (rigid body offset, stays constant through randomization)
                 grasp_rot_d_inv, grasp_pos_d_inv = tf_inverse(grasp_rot_d, grasp_pos_d)
@@ -934,7 +933,9 @@ class TestPickItUp(DirectRLEnv):
         self.to_desired_rot[env_ids] = quat_mul(quat_conjugate(self.robot_grasp_rot[env_ids]), q_rel)
         self.helper_variable[env_ids].zero_()
         self.grasped[env_ids].fill_(False) # stop updating with grasp detection cause no physics simulation
-        self.stage[env_ids].zero_()
+        self.grasped_and_lifted[env_ids].fill_(False)
+        self.stage[env_ids] = 0
+        self.stage[env_ids, 0] = 1  # stage 0 (pregrasp not yet reached) is active at reset
         self.past_relative_dist[env_ids].zero_()
         self.prev_actions[env_ids].zero_()
 
@@ -1039,11 +1040,10 @@ class TestPickItUp(DirectRLEnv):
             ),
             dim=-1,
         )
-
         # if self.cfg.randomize_init:
         #     obs = obs + torch.randn_like(obs) * 0.002
 
-        return {"policy": torch.clamp(obs, -5.0, 5.0)}
+        return {"policy": torch.clamp(obs, -5.0, 5.0)} # TODO: check if it is good
 
 
     def _compute_rewards(
@@ -1580,7 +1580,7 @@ class TestPickItUp(DirectRLEnv):
 
     def _compute_target_object_corners(self, env_ids: torch.Tensor):
         pos = self.target_object.data.root_pos_w[env_ids]
-        quat= quat_conjugate(self.target_object.data.root_quat_w[env_ids])
+        quat = self.target_object.data.root_quat_w[env_ids]  # world quat for local→world transform
         self.corners_target_obj[env_ids] = transform_points(points=self.local_corners_init[env_ids],
                                               pos=pos,
                                               quat=quat)
@@ -1590,7 +1590,7 @@ class TestPickItUp(DirectRLEnv):
 
     def _compute_basket_corners(self, env_ids: torch.Tensor):
         pos  = self.target_site.data.root_pos_w[env_ids]
-        quat = quat_conjugate(self.target_site.data.root_quat_w[env_ids])
+        quat = self.target_site.data.root_quat_w[env_ids]  # world quat for local→world transform
         self.basket_corners_world[env_ids] = transform_points(
             points=self.local_basket_corners_init[env_ids],
             pos=pos,
@@ -1600,7 +1600,11 @@ class TestPickItUp(DirectRLEnv):
     def _update_past_relative_dist(self, env_ids: torch.Tensor | None = None):
         if env_ids is None:
             env_ids = self._robot._ALL_INDICES
-        new_dist = torch.linalg.norm(self.target_to_hand_pos[env_ids], dim=-1)
+        # Compute fresh distance here — self.target_to_hand_pos is written in _get_observations
+        # which runs after _get_dones, so using it would be one step stale.
+        new_dist = torch.linalg.norm(
+            self.target_object.data.root_pos_w[env_ids] - self.robot_grasp_pos[env_ids], dim=-1
+        )
         self.past_relative_dist[env_ids] = torch.cat([new_dist.unsqueeze(1), self.past_relative_dist[env_ids, :-1]], dim=1)
 
 
@@ -1609,9 +1613,8 @@ class TestPickItUp(DirectRLEnv):
             env_ids = self._robot._ALL_INDICES
         debug=False
         jacobians = self._robot.root_physx_view.get_jacobians() # shape [num_envs, num_bodies, task_space, joint_space]
-
-        left_finger_jacobians = jacobians[:, self.left_finger_joint_idx]
-        right_finger_jacobians= jacobians[:, self.right_finger_joint_idx]
+        left_finger_jacobians  = jacobians[:, self.left_finger_body_idx - 1] # joint 0 is removed as it is fixed
+        right_finger_jacobians = jacobians[:, self.right_finger_body_idx - 1]
 
             
         finger_jacobians = (left_finger_jacobians + right_finger_jacobians)/2
@@ -2040,39 +2043,39 @@ class TestPickItUp(DirectRLEnv):
         pos_delta * 0.01
         )
         return reward, {
-            "xy_err": xy_err,
-            "z_err": z_err,
-            "pos_error": pos_error,
-            "angle_error": angle_error,
-            "r_xy": r_xy,
-            "r_z": r_z,
-            "r_rot": r_rot,
-            "pos_error_stage_1": pos_error_stage_1,
-            "gripper_pos": self._robot.data.joint_pos[:,-1],
-            "ascend_diff": ascend_diff,
-            "xy_err_site" : xy_err_site,
-            "open_reward": open_reward,
-            "close_reward": close_reward,
-            "gripper_reward": gripper_reward,
-            "descend_reward": descend_reward,
-            "close_condition": close_condition.float(),
-            "ascend_reward": ascend_reward,
-            "xy_reward": xy_reward,
-            "stage0_mask": stage0_mask,
-            "stage1_mask": stage1_mask,
-            "stage2_mask": stage2_mask,
-            "stage3_mask": stage3_mask,
-            "stage4_mask": stage4_mask,
-            "stage0_reward": stage0_reward,
-            "stage1_reward": stage1_reward,
-            "stage2_reward": stage2_reward,
-            "stage3_reward": stage3_reward,
-            "stage4_reward": stage4_reward,
-            "descend_reward_stage4": descend_reward_stage4,
-            "retract_reward_stage4": retract_reward_stage4,
-            "release_reward_stage4": release_reward_stage4,
-            "obj_above_site": obj_above_site,
-            "tcp_above_obj": tcp_above_obj,
+            # "xy_err": xy_err,
+            # "z_err": z_err,
+            # "pos_error": pos_error,
+            # "angle_error": angle_error,
+            # "r_xy": r_xy,
+            # "r_z": r_z,
+            # "r_rot": r_rot,
+            # "pos_error_stage_1": pos_error_stage_1,
+            # "gripper_pos": self._robot.data.joint_pos[:,-1],
+            # "ascend_diff": ascend_diff,
+            # "xy_err_site" : xy_err_site,
+            # "open_reward": open_reward,
+            # "close_reward": close_reward,
+            # "gripper_reward": gripper_reward,
+            # "descend_reward": descend_reward,
+            # "close_condition": close_condition.float(),
+            # "ascend_reward": ascend_reward,
+            # "xy_reward": xy_reward,
+            # "stage0_mask": stage0_mask,
+            # "stage1_mask": stage1_mask,
+            # "stage2_mask": stage2_mask,
+            # "stage3_mask": stage3_mask,
+            # "stage4_mask": stage4_mask,
+            # "stage0_reward": stage0_reward,
+            # "stage1_reward": stage1_reward,
+            # "stage2_reward": stage2_reward,
+            # "stage3_reward": stage3_reward,
+            # "stage4_reward": stage4_reward,
+            # "descend_reward_stage4": descend_reward_stage4,
+            # "retract_reward_stage4": retract_reward_stage4,
+            # "release_reward_stage4": release_reward_stage4,
+            # "obj_above_site": obj_above_site,
+            # "tcp_above_obj": tcp_above_obj,
             "success": success,
         }
 

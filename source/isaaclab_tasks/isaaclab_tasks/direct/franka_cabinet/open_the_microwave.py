@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""TurnOnTheStove: Franka arm turns on a stove by rotating the button knob."""
+"""OpenTheMicrowave: Franka arm opens a microwave door by pulling the handle."""
 
 from __future__ import annotations
 
@@ -30,12 +30,12 @@ from isaaclab_eureka.utils import eureka_root_dir, read_pkl
 
 
 @configclass
-class TurnOnTheStoveCfg(DirectRLEnvCfg):
+class OpenTheMicrowaveCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 8.65
     decimation = 2
     action_space = 8
-    # 9 dof_pos + 9 dof_vel + 3 hand_to_button + 1 button_angle + 8 prev_actions-actions
+    # 9 dof_pos + 9 dof_vel + 3 hand_to_handle + 1 door_angle + 8 prev_actions-actions
     observation_space = 30
     state_space = 0
     seed = 42
@@ -124,16 +124,16 @@ class TurnOnTheStoveCfg(DirectRLEnvCfg):
 
     action_scale = 7.5
     dof_velocity_scale = 0.1
-    # button_joint range: 0 to 2.1 rad (from URDF); success at 1.5 rad
-    button_success_threshold = 1.5
+    # microjoint range: -2.094 to 0 rad (from MJCF); success when door open past 70 deg
+    door_success_threshold = -1.222
 
     camera_sensor_record: bool = False
 
 
-class TurnOnTheStove(DirectRLEnv):
-    cfg: TurnOnTheStoveCfg
+class OpenTheMicrowave(DirectRLEnv):
+    cfg: OpenTheMicrowaveCfg
 
-    def __init__(self, cfg: TurnOnTheStoveCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: OpenTheMicrowaveCfg, render_mode: str | None = None, **kwargs):
 
         def get_env_local_pose(env_pos: torch.Tensor, xformable: UsdGeom.Xformable, device: torch.device):
             """Compute pose in env-local coordinates"""
@@ -162,7 +162,7 @@ class TurnOnTheStove(DirectRLEnv):
         self.root = eureka_root_dir()
         self.path = (
             f"{self.root}/libero/trajs/libero90/"
-            "libero_90_kitchen_scene3_turn_on_the_stove_traj_v2.pkl"
+            "libero_90_kitchen_scene7_open_the_microwave_traj_v2.pkl"
         )
 
         self.data = read_pkl(self.path)
@@ -212,25 +212,22 @@ class TurnOnTheStove(DirectRLEnv):
         robot_local_grasp_pose_rot, robot_local_pose_pos = tf_combine(
             hand_pose_inv_rot, hand_pose_inv_pos, finger_pose[3:7], finger_pose[0:3]
         )
-        # robot_local_pose_pos += torch.tensor([0, 0.0, 0.04], device=self.device) # already works well
-        #TODO: check if this is object specific
-        robot_local_pose_pos += grasp_offset # This one is tuned from libero demo
+        robot_local_pose_pos += grasp_offset
 
-        self.robot_local_grasp_pos = robot_local_pose_pos.repeat((self.num_envs, 1)) # 3
-        self.robot_local_grasp_rot = robot_local_grasp_pose_rot.repeat((self.num_envs, 1)) # 4
-
+        self.robot_local_grasp_pos = robot_local_pose_pos.repeat((self.num_envs, 1))  # 3
+        self.robot_local_grasp_rot = robot_local_grasp_pose_rot.repeat((self.num_envs, 1))  # 4
 
         self.hand_link_idx = self._robot.find_bodies("panda_link7")[0][0]
         self.left_finger_body_idx = self._robot.find_bodies("panda_leftfinger")[0][0]
         self.right_finger_body_idx = self._robot.find_bodies("panda_rightfinger")[0][0]
-        self.button_joint_idx = self._stove.find_joints("button_joint")[0][0]
-        # button link for world-frame position tracking
-        # pdb.set_trace()
-        self.button_body_idx = self._stove.find_bodies("button")[0][0]
+        self.door_joint_idx = self._microwave.find_joints("microjoint")[0][0]
+        # microdoorroot is the door body containing the handle geometry
+        self.door_body_idx = self._microwave.find_bodies("microdoorroot")[0][0]
+
         self.robot_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
         self.robot_grasp_pos = torch.zeros((self.num_envs, 3), device=self.device)
-        self.button_pos_w = torch.zeros((self.num_envs, 3), device=self.device)
-        self.hand_to_button_pos = torch.zeros((self.num_envs, 3), device=self.device)
+        self.handle_pos_w = torch.zeros((self.num_envs, 3), device=self.device)
+        self.hand_to_handle_pos = torch.zeros((self.num_envs, 3), device=self.device)
         self.prev_actions = torch.zeros((self.num_envs, cfg.action_space), device=self.device)
 
         self.debug_vis = True
@@ -288,29 +285,29 @@ class TurnOnTheStove(DirectRLEnv):
         self._robot = Articulation(robot_cfg)
         self.scene.articulations["robot"] = self._robot
 
-        stove_data = init_states["flat_stove"]
-        stove_cfg = ArticulationCfg(
-            prim_path="/World/envs/env_.*/Stove",
+        microwave_data = init_states["microwave"]
+        microwave_cfg = ArticulationCfg(
+            prim_path="/World/envs/env_.*/Microwave",
             spawn=sim_utils.UsdFileCfg(
-                usd_path=f"{self.root}/libero/COMMON/articulated_objects/flat_stove/usd/flat_stove_urdf.usd",
+                usd_path=f"{self.root}/libero/COMMON/articulated_objects/microwave/usd1/microwave.usd",
                 activate_contact_sensors=False,
             ),
             init_state=ArticulationCfg.InitialStateCfg(
-                pos=stove_data["pos"],
-                rot=stove_data["rot"],
-                joint_pos={"button_joint": 0.0},
+                pos=microwave_data["pos"],
+                rot=microwave_data["rot"],
+                joint_pos={"microjoint": 0.0},
             ),
             actuators={
-                "knob": ImplicitActuatorCfg(
-                    joint_names_expr=["button_joint"],
+                "door": ImplicitActuatorCfg(
+                    joint_names_expr=["microjoint"],
                     effort_limit_sim=1000.0,
                     stiffness=0.0,
                     damping=1.0,
                 ),
             },
         )
-        self._stove = Articulation(stove_cfg)
-        self.scene.articulations["stove"] = self._stove
+        self._microwave = Articulation(microwave_cfg)
+        self.scene.articulations["microwave"] = self._microwave
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
@@ -352,8 +349,8 @@ class TurnOnTheStove(DirectRLEnv):
         self._compute_intermediate_values()
         if self.debug_vis:
             self.debug_vis_mine()
-        button_angle = self._stove.data.joint_pos[:, self.button_joint_idx]
-        terminated = button_angle > self.cfg.button_success_threshold
+        door_angle = self._microwave.data.joint_pos[:, self.door_joint_idx]
+        terminated = door_angle < self.cfg.door_success_threshold
         print(terminated.float().mean())
         truncated = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, truncated
@@ -408,25 +405,29 @@ class TurnOnTheStove(DirectRLEnv):
         self._robot.set_joint_position_target(joint_pos, env_ids=env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
 
-        # Reset stove button to 0; root is fixed so no pose reset needed
-        stove_joint_pos = self._stove.data.default_joint_pos[env_ids].clone()
-        stove_joint_pos[:, self.button_joint_idx] = 0.0
-        stove_joint_vel = torch.zeros_like(stove_joint_pos)
-        self._stove.write_joint_state_to_sim(stove_joint_pos, stove_joint_vel, env_ids=env_ids)
+        # Reset microwave root pose (world pos = local pos + env_origin, stored in default_root_state)
+        self._microwave.write_root_pose_to_sim(
+            self._microwave.data.default_root_state[env_ids, :7], env_ids=env_ids
+        )
+        # Reset door to closed
+        microwave_joint_pos = self._microwave.data.default_joint_pos[env_ids].clone()
+        microwave_joint_pos[:, self.door_joint_idx] = 0.0
+        microwave_joint_vel = torch.zeros_like(microwave_joint_pos)
+        self._microwave.write_joint_state_to_sim(microwave_joint_pos, microwave_joint_vel, env_ids=env_ids)
 
         self.prev_actions[env_ids].zero_()
         self._compute_intermediate_values(env_ids=env_ids)
 
     def _get_observations(self) -> dict:
         """
-        Task: rotate button_joint from 0 to > 1.5 rad to turn on the stove.
+        Task: rotate microjoint from 0 to < -1.0 rad to open the microwave.
 
         Key attributes for reward shaping:
         - self.robot_grasp_pos: TCP world position [num_envs, 3]
-        - self.hand_to_button_pos: vector from TCP to button center [num_envs, 3]
-        - self.button_pos_w: button world position [num_envs, 3]
-        - self._stove.data.joint_pos[:, self.button_joint_idx]: button angle [num_envs]
-        - self.cfg.button_success_threshold: 1.5 rad
+        - self.hand_to_handle_pos: vector from TCP to door handle center [num_envs, 3]
+        - self.handle_pos_w: handle world position [num_envs, 3]
+        - self._microwave.data.joint_pos[:, self.door_joint_idx]: door angle [num_envs]
+        - self.cfg.door_success_threshold: -1.222 rad (70 degrees)
         """
         dof_pos_scaled = (
             2.0
@@ -434,13 +435,13 @@ class TurnOnTheStove(DirectRLEnv):
             / (self.robot_dof_upper_limits - self.robot_dof_lower_limits)
             - 1.0
         )
-        button_angle = self._stove.data.joint_pos[:, self.button_joint_idx].unsqueeze(-1)
+        door_angle = self._microwave.data.joint_pos[:, self.door_joint_idx].unsqueeze(-1)
         obs = torch.cat(
             (
                 dof_pos_scaled,                                              # 9
                 self._robot.data.joint_vel * self.cfg.dof_velocity_scale,   # 9
-                self.hand_to_button_pos,                                     # 3
-                button_angle,                                                # 1
+                self.hand_to_handle_pos,                                     # 3
+                door_angle,                                                  # 1
                 self.prev_actions - self.actions,                            # 8
             ),
             dim=-1,
@@ -457,8 +458,8 @@ class TurnOnTheStove(DirectRLEnv):
             hand_rot, hand_pos, self.robot_local_grasp_rot[env_ids], self.robot_local_grasp_pos[env_ids]
         )
 
-        self.button_pos_w[env_ids] = self._stove.data.body_pos_w[env_ids, self.button_body_idx]
-        self.hand_to_button_pos[env_ids] = self.button_pos_w[env_ids] - self.robot_grasp_pos[env_ids]
+        self.handle_pos_w[env_ids] = self._microwave.data.body_pos_w[env_ids, self.door_body_idx]
+        self.hand_to_handle_pos[env_ids] = self.handle_pos_w[env_ids] - self.robot_grasp_pos[env_ids]
 
     def define_markers(self) -> VisualizationMarkers:
         marker_cfg = VisualizationMarkersCfg(
@@ -473,8 +474,8 @@ class TurnOnTheStove(DirectRLEnv):
         return VisualizationMarkers(marker_cfg)
 
     def debug_vis_mine(self):
-        translations = self.button_pos_w
-        orientations = self._stove.data.body_quat_w[:, self.button_body_idx]
+        translations = self.handle_pos_w
+        orientations = self._microwave.data.body_quat_w[:, self.door_body_idx]
         self.visualizer.visualize(translations=translations, orientations=orientations)
 
     # --- Stubs: not needed for this task ---
@@ -563,10 +564,10 @@ class TurnOnTheStove(DirectRLEnv):
                 self.scene.update(dt=self.physics_dt)
 
                 self._compute_intermediate_values()
-                diff = self.hand_to_button_pos[0]
-                dist = torch.norm(self.hand_to_button_pos, dim=-1)
-                print(f"t={t:4d} | gripper-to-knob dx={diff[0].item():.4f} dy={diff[1].item():.4f} dz={diff[2].item():.4f} |d|={dist[0].item():.4f} m")
-                writer.add_scalar("Replay/gripper_to_knob_dist_mean", dist.mean().item(), t)
+                diff = self.hand_to_handle_pos[0]
+                dist = torch.norm(self.hand_to_handle_pos, dim=-1)
+                print(f"t={t:4d} | gripper-to-handle dx={diff[0].item():.4f} dy={diff[1].item():.4f} dz={diff[2].item():.4f} |d|={dist[0].item():.4f} m")
+                writer.add_scalar("Replay/gripper_to_handle_dist_mean", dist.mean().item(), t)
 
         writer.close()
 
@@ -598,9 +599,8 @@ class TurnOnTheStove(DirectRLEnv):
         rep_writer = rep.BasicWriter(output_dir=output_dir, frame_padding=0)
 
         env_origin = self.scene.env_origins[0]
-        # Camera positioned above and to the side, looking at the stove knob
         camera_positions = torch.tensor([[0.8, 0.6, 1.0]], device=self.device) + env_origin
-        camera_targets = self.button_pos_w[0:1].clone()
+        camera_targets = self.handle_pos_w[0:1].clone()
         camera.set_world_poses_from_view(camera_positions, camera_targets)
 
         camera_index = 0
@@ -655,13 +655,13 @@ class TurnOnTheStove(DirectRLEnv):
                     {
                         "type": "text",
                         "text": (
-                            "Analyze this image sequence showing a robot arm near a stove knob.\n\n"
+                            "Analyze this image sequence showing a robot arm near a microwave.\n\n"
                             "Answer each question with ONLY: yes / no / unsure\n\n"
-                            "Q1: Does the robot gripper make contact with or get very close to the stove knob?\n"
+                            "Q1: Does the robot gripper make contact with or get very close to the microwave door handle?\n"
                             "A1: <yes/no/unsure>\n\n"
-                            "Q2: Does the stove knob visibly rotate during the sequence?\n"
+                            "Q2: Does the microwave door visibly open during the sequence?\n"
                             "A2: <yes/no/unsure>\n\n"
-                            "Q3: In the final frame, does the knob appear to be rotated significantly (turned on)?\n"
+                            "Q3: In the final frame, does the microwave door appear to be open significantly?\n"
                             "A3: <yes/no/unsure>\n\n"
                             "Reasoning: <brief explanation>"
                         ),

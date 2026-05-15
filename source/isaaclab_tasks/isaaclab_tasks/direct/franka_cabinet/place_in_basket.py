@@ -22,7 +22,7 @@ from .test_pick_it_up import TestPickItUp, TestPickItUpCfg
 @configclass
 class PlaceInBasketCfg(TestPickItUpCfg):
     camera_sensor_record: bool = False
-    start_in_air: bool = True  # always start mid-air (object already grasped)
+    start_in_air: bool = False  # always start mid-air (object already grasped)
 
 
 class PlaceInBasket(TestPickItUp):
@@ -33,7 +33,7 @@ class PlaceInBasket(TestPickItUp):
         _, truncated = super()._get_dones()
 
         # Terminate when object is inside the basket and low enough
-        terminated = self.inside_site & self.low_enough
+        terminated = self.inside_site & self.low_enough & self.high_enough_for_basket
         return terminated, truncated
 
     def get_feedback_from_vlm(self, output_dir) -> str:

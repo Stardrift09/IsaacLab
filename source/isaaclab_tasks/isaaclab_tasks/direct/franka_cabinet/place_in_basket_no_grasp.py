@@ -1,8 +1,7 @@
-"""Ablation: PickItUp without grasp-detection and stage-detection utilities.
+"""PlaceInBasket ablation: no grasp/stage detection utilities.
 
-Removes _grasp_detection, _current_stage_detection, and _pregrasp_detection.
-LLM must shape reward from raw observations only.
-Terminates when object is lifted above basket rim with small rotation (no grasp check).
+LLM must shape reward from raw observations only (no self.stage, no self.grasped).
+Terminates when object lands inside basket (inside_site & low_enough & high_enough_for_basket).
 """
 
 from __future__ import annotations
@@ -10,17 +9,17 @@ from __future__ import annotations
 import torch
 
 from isaaclab.utils import configclass
-from .pick_it_up import PickItUp, PickItUpCfg
-from .test_pick_it_up import TestPickItUp
+
+from .place_in_basket import PlaceInBasket, PlaceInBasketCfg
 
 
 @configclass
-class PickItUpNoGraspCfg(PickItUpCfg):
+class PlaceInBasketNoGraspCfg(PlaceInBasketCfg):
     pass
 
 
-class PickItUpNoGrasp(PickItUp):
-    """Ablation variant: no _grasp_detection, no _current_stage_detection."""
+class PlaceInBasketNoGrasp(PlaceInBasket):
+    """PlaceInBasket ablation: no _grasp_detection, no _current_stage_detection."""
 
     def _grasp_detection(self, env_ids=None):
         if env_ids is None:
@@ -37,14 +36,6 @@ class PickItUpNoGrasp(PickItUp):
             env_ids = self._robot._ALL_INDICES
         return torch.zeros((len(env_ids), self.num_stages), device=self.device)
 
-    def _get_dones(self):
-        # Run TestPickItUp logic directly to populate intermediate values
-        # (high_enough, small_rotation, grasped_and_lifted, etc.).
-        # Ablation: ignore grasped_and_lifted — terminate on lift alone.
-        _, truncated = TestPickItUp._get_dones(self)
-        terminated = self.high_enough & self.small_rotation
-        return terminated, truncated
-
     def _get_observations(self) -> dict:
         """
         All texts in _get_observations() are very important hints for the task!
@@ -59,7 +50,8 @@ class PickItUpNoGrasp(PickItUp):
         self.basket_corners_world: dynamic [num_envs, 8, 3] tensor — all 8 basket corners in world frame, updated every step.
 
         NOTE: _grasp_detection(), _current_stage_detection(), and self.stage are NOT available.
-        Shape rewards using raw geometry: finger positions, object height, distances, contact forces via
+        Robot starts with object already grasped mid-air. Shape rewards using raw geometry:
+        finger positions, object height, site_to_target_pos, contact forces via
         self.scene['left_contact_sensor'] and self.scene['right_contact_sensor'].
         """
         dof_pos_scaled = (
