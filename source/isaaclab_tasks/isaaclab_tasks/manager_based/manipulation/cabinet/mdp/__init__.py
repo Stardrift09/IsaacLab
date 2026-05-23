@@ -7,5 +7,7 @@
 
 from isaaclab.envs.mdp import *  # noqa: F401, F403
 
+from .events import reset_robot_joints_ik  # noqa: F401
 from .observations import *  # noqa: F401, F403
 from .rewards import *  # noqa: F401, F403
+from .subtask_observations import drawer_approached, drawer_opened  # noqa: F401

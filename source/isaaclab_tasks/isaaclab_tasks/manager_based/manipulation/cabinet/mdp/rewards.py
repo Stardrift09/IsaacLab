@@ -161,3 +161,64 @@ def multi_stage_open_drawer(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -
     open_hard = (drawer_pos > 0.3) * is_graspable
 
     return open_easy + open_medium + open_hard
+
+
+def eureka_open_drawer(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Eureka-discovered reward (~90% success) ported from Direct env (2026-02-25_15-49-15)."""
+    to_target = torch.nan_to_num(
+        env.scene["cabinet_frame"].data.target_pos_w[..., 0, :] - env.scene["ee_frame"].data.target_pos_w[..., 0, :],
+        nan=0.0, posinf=0.0, neginf=0.0,
+    )
+    dist = torch.nan_to_num(torch.linalg.norm(to_target, dim=-1), nan=1e6, posinf=1e6, neginf=1e6)
+
+    drawer_q = torch.nan_to_num(
+        env.scene[asset_cfg.name].data.joint_pos[:, asset_cfg.joint_ids[0]], nan=0.0, posinf=0.0, neginf=0.0
+    )
+    drawer_qd = torch.nan_to_num(
+        env.scene[asset_cfg.name].data.joint_vel[:, asset_cfg.joint_ids[0]], nan=0.0, posinf=0.0, neginf=0.0
+    )
+    qd = torch.nan_to_num(env.scene["robot"].data.joint_vel, nan=0.0, posinf=0.0, neginf=0.0)
+    qd_norm = torch.nan_to_num(torch.linalg.norm(qd, dim=-1), nan=0.0, posinf=1e3, neginf=0.0)
+
+    temp_reach = 0.08
+    r_reach = torch.exp(-dist / temp_reach)
+
+    success_thresh = 0.39
+    open_band = 0.08
+    open_prog = torch.clamp((drawer_q - (success_thresh - 0.02)) / (open_band + 1e-6), 0.0, 1.0)
+
+    temp_open = 0.25
+    r_open = torch.exp(-(1.0 - open_prog) / temp_open)
+
+    open_vel = torch.clamp(drawer_qd, min=0.0)
+    temp_vel = 0.20
+    r_open_vel = 1.0 - torch.exp(-open_vel / temp_vel)
+
+    temp_smooth = 6.0
+    r_smooth = torch.exp(-qd_norm / temp_smooth)
+
+    success = (drawer_q > success_thresh).to(drawer_q.dtype)
+
+    reach_gate = torch.clamp(r_reach * 1.2, 0.0, 1.0)
+
+    reward = (
+        0.35 * r_reach
+        + 0.55 * (reach_gate * r_open)
+        + 0.15 * (reach_gate * r_open_vel)
+        + 0.08 * r_smooth
+    )
+
+    far_penalty = torch.clamp((dist - 0.25) / 0.25, min=0.0, max=1.0)
+    reward = reward - 0.10 * far_penalty
+
+    reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
+    reward = torch.clamp(reward, -2.0, 3.0)
+
+    # Success bonus added after clamp so it is never truncated
+    reward = reward + 5.5 * success
+
+    # Time penalty: penalizes slow success; grows 0→3.0 across episode
+    time_frac = env.episode_length_buf.float() / env.max_episode_length
+    reward = reward - 3.0 * time_frac * success
+
+    return reward

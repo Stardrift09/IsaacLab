@@ -62,6 +62,20 @@ gym.register(
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     kwargs={
         "env_cfg_entry_point": f"{__name__}.ik_rel_env_cfg:FrankaCabinetEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:CabinetPPORunnerCfg",
+    },
+    disable_env_checker=True,
+)
+
+##
+# MimicGen - Inverse Kinematics Relative Pose Control
+##
+
+gym.register(
+    id="Isaac-Open-Drawer-Franka-IK-Rel-Mimic-v0",
+    entry_point="isaaclab_mimic.envs.franka_cabinet_mimic_env:FrankaCabinetMimicEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.franka_cabinet_mimic_env_cfg:FrankaCabinetMimicEnvCfg",
     },
     disable_env_checker=True,
 )

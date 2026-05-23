@@ -72,7 +72,7 @@ class CabinetSceneCfg(InteractiveSceneCfg):
             "drawers": ImplicitActuatorCfg(
                 joint_names_expr=["drawer_top_joint", "drawer_bottom_joint"],
                 effort_limit_sim=87.0,
-                stiffness=10.0,
+                stiffness=0.0,
                 damping=1.0,
             ),
             "doors": ImplicitActuatorCfg(
