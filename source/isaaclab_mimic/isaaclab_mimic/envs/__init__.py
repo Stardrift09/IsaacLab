@@ -159,3 +159,30 @@ gym.register(
     },
     disable_env_checker=True,
 )
+
+##
+# Franka Pick-and-Place-in-Basket (IK Relative) - MimicGen pipeline
+##
+gym.register(
+    id="Isaac-Franka-PickBasket-IK-Rel-Mimic-v0",
+    entry_point=f"{__name__}.franka_pick_basket_mimic_env:FrankaPickBasketMimicEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.franka_pick_basket_mimic_env_cfg:FrankaPickBasketMimicEnvCfg",
+    },
+    disable_env_checker=True,
+)
+
+##
+# Franka Cabinet Open-Drawer (IK Relative) - MimicGen pipeline
+##
+gym.register(
+    id="Isaac-Open-Drawer-Franka-IK-Rel-Mimic-v0",
+    entry_point=f"{__name__}.franka_cabinet_mimic_env:FrankaCabinetMimicEnv",
+    kwargs={
+        "env_cfg_entry_point": (
+            "isaaclab_tasks.manager_based.manipulation.cabinet.config.franka"
+            ".franka_cabinet_mimic_env_cfg:FrankaCabinetMimicEnvCfg"
+        ),
+    },
+    disable_env_checker=True,
+)

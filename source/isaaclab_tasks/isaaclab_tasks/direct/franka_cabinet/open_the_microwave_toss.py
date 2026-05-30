@@ -220,8 +220,12 @@ class OpenTheMicrowave(DirectRLEnv):
         self.hand_link_idx = self._robot.find_bodies("panda_link7")[0][0]
         self.left_finger_body_idx = self._robot.find_bodies("panda_leftfinger")[0][0]
         self.right_finger_body_idx = self._robot.find_bodies("panda_rightfinger")[0][0]
+
+        # MjcfConverter drops the "micro" prefix: microdoorroot → doorroot, microjoint → first joint
+        print(f"[OpenTheMicrowave] microwave joint_names: {self._microwave.joint_names}")
+        print(f"[OpenTheMicrowave] microwave body_names: {self._microwave.body_names}")
         self.door_joint_idx = self._microwave.find_joints("microjoint")[0][0]
-        # microdoorroot is the door body containing the handle geometry
+        # doorroot is the door body in USD (MJCF microdoorroot → doorroot after conversion)
         self.door_body_idx = self._microwave.find_bodies("microdoorroot")[0][0]
 
         self.robot_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
@@ -291,6 +295,9 @@ class OpenTheMicrowave(DirectRLEnv):
             spawn=sim_utils.UsdFileCfg(
                 usd_path=f"{self.root}/libero/COMMON/articulated_objects/microwave/usd1/microwave.usd",
                 activate_contact_sensors=False,
+                articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                    fix_root_link=True,
+                ),
             ),
             init_state=ArticulationCfg.InitialStateCfg(
                 pos=microwave_data["pos"],
@@ -405,10 +412,7 @@ class OpenTheMicrowave(DirectRLEnv):
         self._robot.set_joint_position_target(joint_pos, env_ids=env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
 
-        # Reset microwave root pose (world pos = local pos + env_origin, stored in default_root_state)
-        self._microwave.write_root_pose_to_sim(
-            self._microwave.data.default_root_state[env_ids, :7], env_ids=env_ids
-        )
+        # Root is fixed (fix_root_link=True) — no pose reset needed, same as stove
         # Reset door to closed
         microwave_joint_pos = self._microwave.data.default_joint_pos[env_ids].clone()
         microwave_joint_pos[:, self.door_joint_idx] = 0.0
@@ -474,8 +478,12 @@ class OpenTheMicrowave(DirectRLEnv):
         return VisualizationMarkers(marker_cfg)
 
     def debug_vis_mine(self):
-        translations = self.handle_pos_w
-        orientations = self._microwave.data.body_quat_w[:, self.door_body_idx]
+        # Show robot TCP and microwave door handle, following test_pick_it_up.py pattern
+        translations = torch.cat([self.robot_grasp_pos, self.handle_pos_w], dim=0)
+        orientations = torch.cat([
+            self.robot_grasp_rot,
+            self._microwave.data.body_quat_w[:, self.door_body_idx],
+        ], dim=0)
         self.visualizer.visualize(translations=translations, orientations=orientations)
 
     # --- Stubs: not needed for this task ---

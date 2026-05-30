@@ -15,6 +15,7 @@ from . import agents
 ##
 
 task_dict = { # Using the same config, manually set
+    "OpenDrawerAndPutCreamCheese": "open_drawer_and_put_cream_cheese",
     "TestStageAsFeedback": "test_stage_as_feedback",
     "TestPickItUp": "test_pick_it_up",
     "TestCollideAndPlace": "test_collide_and_place",
@@ -31,6 +32,7 @@ task_dict = { # Using the same config, manually set
     "PlaceInBasketDropNoGrasp": "place_in_basket_drop_no_grasp",
     "PickItUpNoGrasp": "pick_it_up_no_grasp",
     "PickItUpNoGraspGamma99": "pick_it_up_no_grasp_gamma99",
+    "TestPlaceCreamCheeseInDrawer": "test_place_basket_in_drawer",
 }
 
 

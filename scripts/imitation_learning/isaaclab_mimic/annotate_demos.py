@@ -371,6 +371,12 @@ def replay_episode(
                 continue
         action_tensor = torch.Tensor(action).reshape([1, action.shape[0]])
         env.step(torch.Tensor(action_tensor))
+    # Debug: print drawer joint position after replay
+    cabinet = env.scene["cabinet"]
+    joint_idx = cabinet.find_joints("drawer_top_joint")[0][0]
+    drawer_pos = cabinet.data.joint_pos[0, joint_idx].item()
+    print(f"\t[DEBUG] drawer_top_joint after replay: {drawer_pos:.4f} m")
+
     if success_term is not None:
         if not bool(success_term.func(env, **success_term.params)[0]):
             return False

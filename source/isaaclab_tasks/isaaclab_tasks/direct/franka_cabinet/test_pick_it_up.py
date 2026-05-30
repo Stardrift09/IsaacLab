@@ -63,6 +63,9 @@ class TestPickItUpCfg(DirectRLEnvCfg):
     start_in_air: bool = False
     randomize_init: bool = True
     randomize_rotation: bool = False  # if False, skip joint6/7 noise (no EEF rotation perturbation)
+    arm_joint_noise: float = 0.05    # std (rad) added to all 7 arm joints at reset (start_in_air=False)
+    object_pos_noise: float = 0.03   # std (m) of XY jitter on target object at reset (start_in_air=False)
+    basket_pos_noise: float = 0.03   # std (m) of XY jitter on basket at every reset
 
 
     # robot
@@ -910,10 +913,24 @@ class TestPickItUp(DirectRLEnv):
                 if self.cfg.randomize_rotation:
                     joint_pos[:, 5] += torch.randn(len(env_ids), device=self.device) * 0.15
                     joint_pos[:, 6] += torch.randn(len(env_ids), device=self.device) * 0.15
+                if self.cfg.arm_joint_noise > 0:
+                    joint_pos[:, :7] += torch.randn(len(env_ids), 7, device=self.device) * self.cfg.arm_joint_noise
                 joint_pos = torch.clamp(joint_pos, self.robot_dof_lower_limits, self.robot_dof_upper_limits)
 
             self._robot.set_joint_position_target(joint_pos, env_ids=env_ids)
             self._robot.write_joint_state_to_sim(joint_pos, torch.zeros_like(joint_pos), env_ids=env_ids)
+
+        # XY jitter on basket (every reset, env-local coords)
+        if self.cfg.basket_pos_noise > 0:
+            noise_xy = torch.zeros(len(env_ids), 3, device=self.device)
+            noise_xy[:, :2] = torch.randn(len(env_ids), 2, device=self.device) * self.cfg.basket_pos_noise
+            self.rigid_objects[self.target_site_name].data.default_root_state[env_ids, :3] += noise_xy
+
+        # XY jitter on target object (only when starting from table; start_in_air overrides position via FK)
+        if not self.start_in_air and self.cfg.object_pos_noise > 0:
+            noise_xy = torch.zeros(len(env_ids), 3, device=self.device)
+            noise_xy[:, :2] = torch.randn(len(env_ids), 2, device=self.device) * self.cfg.object_pos_noise
+            self.target_object.data.default_root_state[env_ids, :3] += noise_xy
 
         # for objects
         for object_name in self.object_names:
@@ -1897,185 +1914,377 @@ class TestPickItUp(DirectRLEnv):
         return reward, individual_rewards
 
 
-    def _get_rewards_test(self):
+
+    def _get_rewards_test(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         import torch
 
-        stage0_mask = self.stage[:, 0]
-        stage1_mask = self.stage[:, 1]
-        stage2_mask = self.stage[:, 2]
-        stage3_mask = self.stage[:, 3]
-        stage4_mask = self.stage[:, 4]
-        
-        stage1_bonus = stage1_mask.float() * 1
-        stage2_bonus = stage2_mask.float() * 2 # grasped
-        stage3_bonus = stage3_mask.float() * 3
-        stage4_bonus = stage4_mask.float() * 4
-        self.helper_variable[:, 0] = torch.max(self.helper_variable[:, 0], stage0_mask)  # If stage0 pregrasp has ever been reached
+        eps = 1.0e-6
+        dtype = self.target_object.data.root_pos_w.dtype
 
-        # target position: 20 cm above object
-        target_pos = self.target_object.data.root_pos_w.clone()
-        target_pos[:, 2] += 0.2
+        # --------------------------------------------------------------------- #
+        # Sanitize state
+        # --------------------------------------------------------------------- #
+        eef_pos = torch.nan_to_num(self.robot_grasp_pos, nan=0.0, posinf=0.0, neginf=0.0)
+        obj_pos = torch.nan_to_num(self.target_object.data.root_pos_w, nan=0.0, posinf=0.0, neginf=0.0)
+        site_pos = torch.nan_to_num(self.target_site.data.root_pos_w, nan=0.0, posinf=0.0, neginf=0.0)
+        obj_corners = torch.nan_to_num(self.corners_target_obj, nan=0.0, posinf=0.0, neginf=0.0)
+        basket_corners = torch.nan_to_num(self.basket_corners_world, nan=0.0, posinf=0.0, neginf=0.0)
 
-        pos_diff = self.robot_grasp_pos - target_pos
-        xy_err = torch.norm(pos_diff[:, :2], dim=-1)
-        z_err = torch.abs(pos_diff[:, 2])
-        pos_error = torch.norm(pos_diff, dim=-1)
+        stage = torch.nan_to_num(self.stage.float(), nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
+        s0 = stage[:, 0]
+        s1 = stage[:, 1]
+        s2 = stage[:, 2]
+        s3 = stage[:, 3]
+        s4 = stage[:, 4]
 
-        # smoother position shaping
-        r_xy = torch.exp(-xy_err / 0.10)
-        r_z = torch.exp(-z_err / 0.10)
-        r_pos = torch.exp(-pos_error / 0.10)
+        grasped_f = self.grasped.float()
+        high_enough_f = self.high_enough.float()
 
-        # rotation error
-        current_q = self.robot_grasp_rot
-        desired_q = self.q_rel
+        actions = torch.nan_to_num(self.actions, nan=0.0, posinf=0.0, neginf=0.0)
+        prev_actions = torch.nan_to_num(self.prev_actions, nan=0.0, posinf=0.0, neginf=0.0)
+        gripper_action = actions[:, -1]
 
-        current_q_inv = quat_conjugate(current_q)
-        q_error = quat_mul(desired_q, current_q_inv)
-        q_error = q_error / torch.norm(q_error, dim=-1, keepdim=True).clamp_min(1e-9)
-        # assumes [w, x, y, z]
-        q_error = torch.where(q_error[:, 0:1] < 0, -q_error, q_error)
-        angle_error = 2.0 * torch.acos(torch.clamp(q_error[:, 0], -1.0, 1.0))
+        radius = torch.as_tensor(self.target_site_radius, device=self.device, dtype=dtype)
+        if radius.ndim == 0:
+            radius = radius.expand(self.num_envs)
+        radius = torch.nan_to_num(radius, nan=0.06, posinf=0.06, neginf=0.06).clamp_min(0.025)
 
-        r_rot = torch.exp(-angle_error / 2)
+        # --------------------------------------------------------------------- #
+        # Success metric exactly aligned with task description
+        # --------------------------------------------------------------------- #
+        obj_xy = obj_pos[:, :2]
+        site_xy = site_pos[:, :2]
+        eef_xy = eef_pos[:, :2]
+        obj_z = obj_pos[:, 2]
 
-        stage0_reward = stage0_mask * (0.5 * r_pos + 0.5 * r_rot)
+        basket_z = basket_corners[:, :, 2]
+        basket_bottom_z = basket_z.min(dim=1).values
+        basket_top_z = basket_z.max(dim=1).values
+        basket_mid_z = 0.5 * (basket_bottom_z + basket_top_z)
 
+        obj_to_site_xy = site_xy - obj_xy
+        obj_to_site_xy_dist = torch.linalg.norm(obj_to_site_xy, dim=-1)
+        eef_to_site_xy_dist = torch.linalg.norm(eef_xy - site_xy, dim=-1)
 
+        inside_site = obj_to_site_xy_dist < radius
+        low_enough = obj_z < basket_top_z
+        high_enough_for_basket = obj_z > basket_bottom_z
+        success = inside_site & low_enough & high_enough_for_basket
+        success_f = success.float()
 
+        # --------------------------------------------------------------------- #
+        # Object / robot geometry
+        # --------------------------------------------------------------------- #
+        obj_top_z = obj_corners[:, :, 2].max(dim=1).values
+        obj_bottom_z = obj_corners[:, :, 2].min(dim=1).values
+        obj_height = (obj_top_z - obj_bottom_z).clamp_min(0.01)
 
-        pos_diff_stage_1 = self.robot_grasp_pos - self.target_object.data.root_pos_w
-        pos_error_stage_1 = torch.norm(pos_diff_stage_1, dim=-1)
+        obj_extent_xy = obj_corners[:, :, :2].max(dim=1).values - obj_corners[:, :, :2].min(dim=1).values
+        obj_radius_proxy = (0.5 * torch.linalg.norm(obj_extent_xy, dim=-1)).clamp_min(0.025)
 
-        # gripper action
-        gripper_action = self.actions[:, -1]
+        eef_to_obj_xy_dist = torch.linalg.norm(eef_xy - obj_xy, dim=-1)
+        eef_to_obj_center_dist = torch.linalg.norm(eef_pos - obj_pos, dim=-1)
 
-        # open reward (target = +1)
-        open_error = torch.abs(gripper_action - 1.0)
-        open_reward = torch.exp(-open_error / 0.5)
-        open_reward *= 0.2
+        obj_lin_vel = torch.nan_to_num(self.target_object.data.root_lin_vel_w, nan=0.0, posinf=0.0, neginf=0.0)
+        site_lin_vel = torch.nan_to_num(self.target_site.data.root_lin_vel_w, nan=0.0, posinf=0.0, neginf=0.0)
+        rel_obj_site_vel = obj_lin_vel - site_lin_vel
 
-        # close reward (target = -1)
-        close_error = torch.abs(gripper_action + 1.0)
-        close_reward = torch.exp(-close_error / 0.5)
-        close_reward += 0.2  # keep your monotonic shaping
+        # Desired grasp orientation: reward quaternion-error w -> 1.
+        orientation_temperature = 0.16
+        rot_w = torch.nan_to_num(self.to_desired_rot[:, 0], nan=0.0, posinf=0.0, neginf=0.0).abs().clamp(0.0, 1.0)
+        orientation_score = torch.exp(-((1.0 - rot_w) / orientation_temperature).clamp(0.0, 50.0))
 
-        # condition stays the same
-        close_condition = pos_error_stage_1 < 0.04
+        close_action_temperature = 0.20
+        open_action_temperature = 0.20
+        close_action_score = torch.sigmoid((-gripper_action / close_action_temperature).clamp(-20.0, 20.0))
+        open_action_score = torch.sigmoid((gripper_action / open_action_temperature).clamp(-20.0, 20.0))
 
-        # final reward
-        gripper_reward = torch.where(close_condition, close_reward, open_reward)
-        # if close_condition.float().mean() > 0.6:
-        #     pdb.set_trace()
+        # --------------------------------------------------------------------- #
+        # Stage 0: move TCP above object with reasonable approach orientation
+        # --------------------------------------------------------------------- #
+        pregrasp_xy_temperature = 0.14
+        pregrasp_z_temperature = 0.10
+        desired_pregrasp_z = obj_top_z + 0.09
 
-        # reward descending while staying close in xy
-        # pos_diff[:, 2] > 0 means gripper is above the target
-        above_target = torch.clamp(pos_error_stage_1, min=0.0)
-        descend_reward = (torch.exp(-above_target / 0.1) - torch.exp(torch.tensor(-1.0, device=self.device))) # not constrained to 
+        pregrasp_xy_score = torch.exp(-(eef_to_obj_xy_dist / pregrasp_xy_temperature).clamp(0.0, 50.0))
+        pregrasp_z_score = torch.exp(-(torch.abs(eef_pos[:, 2] - desired_pregrasp_z) / pregrasp_z_temperature).clamp(0.0, 50.0))
+        pregrasp_score = 0.55 * pregrasp_xy_score + 0.25 * pregrasp_z_score + 0.20 * orientation_score
 
-        stage1_reward = stage1_bonus + stage1_mask * (
-            0.4 * gripper_reward +
-            0.5 * descend_reward +
-            0.1 * r_rot 
+        # --------------------------------------------------------------------- #
+        # Stage 1: descend to actual grasp/contact height and close
+        # --------------------------------------------------------------------- #
+        grasp_xy_temperature = 0.050
+        grasp_z_temperature = 0.040
+        grasp_center_temperature = 0.065
+        contact_zone_temperature = 1.00
+        too_high_temperature = 0.08
 
+        desired_grasp_z = obj_pos[:, 2] + 0.15 * obj_height
+        grasp_xy_score = torch.exp(-(eef_to_obj_xy_dist / grasp_xy_temperature).clamp(0.0, 50.0))
+        grasp_z_score = torch.exp(-(torch.abs(eef_pos[:, 2] - desired_grasp_z) / grasp_z_temperature).clamp(0.0, 50.0))
+        center_distance_score = torch.exp(-(eef_to_obj_center_dist / grasp_center_temperature).clamp(0.0, 50.0))
+
+        contact_zone_score = torch.exp(
+            -(
+                (
+                    eef_to_obj_xy_dist / torch.clamp(1.6 * obj_radius_proxy, min=0.035)
+                    + torch.abs(eef_pos[:, 2] - desired_grasp_z) / 0.060
+                )
+                / contact_zone_temperature
+            ).clamp(0.0, 50.0)
         )
 
-        lowest_z_object= self._get_target_object_lowest_points()
-        ascend_diff = lowest_z_object - self.target_site_corners_world[1,2] - 0.05
-        ascend_reward = torch.exp(- torch.abs(ascend_diff)/ 0.1)
-        # print(self.high_enough)
-        stage2_reward = stage2_bonus + stage2_mask * (
-            1 * ascend_reward
+        grasp_pose_score = grasp_xy_score * grasp_z_score * orientation_score
+        grasp_intent_score = grasp_pose_score * close_action_score
+        grasp_progress_score = (
+            0.40 * grasp_pose_score
+            + 0.25 * center_distance_score
+            + 0.25 * grasp_intent_score
+            + 0.10 * contact_zone_score
         )
 
+        too_high_above_grasp = torch.relu(eef_pos[:, 2] - (desired_grasp_z + 0.05))
+        too_high_penalty = 1.0 - torch.exp(-(too_high_above_grasp / too_high_temperature).clamp(0.0, 50.0))
+        far_close_penalty = close_action_score * (1.0 - contact_zone_score).clamp(0.0, 1.0)
 
+        # --------------------------------------------------------------------- #
+        # Stage 2: lift while already beginning to bias object toward basket
+        # --------------------------------------------------------------------- #
+        hold_distance_temperature = 0.10
+        lift_remaining_temperature = 0.13
+        lift_sigmoid_temperature = 0.045
 
-        pos_diff_site = self.target_object.data.root_pos_w - self.target_site.data.root_pos_w
-        pos_diff_site_xy = pos_diff_site[:,:2]
-        xy_err_site = torch.norm(pos_diff_site_xy, dim=-1)
-        # Use two-scale xy reward: wide scale gives gradient when far, tight scale rewards precision
-        xy_reward_wide = torch.exp(-xy_err_site / 0.3)   # gradient even at 1m away
-        xy_reward_tight = torch.exp(-xy_err_site / 0.10) # precision signal when close
-        xy_reward = 0.5 * xy_reward_wide + 0.5 * xy_reward_tight
-        # print(xy_err_site)
-        stage3_reward = stage3_bonus + stage3_mask * (
-            0.2 * ascend_reward +
-            0.8 * xy_reward
+        hold_score = torch.exp(-(eef_to_obj_center_dist / hold_distance_temperature).clamp(0.0, 50.0))
+        lift_target_z = basket_top_z + 0.045
+        remaining_lift = torch.relu(lift_target_z - obj_z)
+        lift_height_score = torch.exp(-(remaining_lift / lift_remaining_temperature).clamp(0.0, 50.0))
+        above_rim_score = torch.sigmoid(((obj_z - basket_top_z) / lift_sigmoid_temperature).clamp(-20.0, 20.0))
+        lift_progress_score = grasped_f * (0.25 * hold_score + 0.55 * lift_height_score + 0.20 * above_rim_score)
+
+        # --------------------------------------------------------------------- #
+        # Transport-to-basket shaping.
+        # Main failure observed: policy reaches lifted stage but hovers far from basket.
+        # This reward makes Stage 3 valuable only when the lifted object/TCP actually
+        # approaches the basket footprint.
+        # --------------------------------------------------------------------- #
+        basket_xy_broad_temperature = 0.55
+        basket_xy_mid_temperature = 0.28
+        basket_xy_fine_temperature = torch.clamp(1.6 * radius, min=0.055)
+        eef_to_basket_temperature = 0.45
+        transport_height_temperature = 0.12
+        velocity_toward_site_temperature = 0.35
+
+        basket_dist_scale = torch.full((self.num_envs,), 0.75, device=self.device, dtype=dtype)
+        basket_dist_norm = (obj_to_site_xy_dist / basket_dist_scale).clamp(0.0, 1.0)
+        basket_linear_score = (1.0 - basket_dist_norm).clamp(0.0, 1.0)
+
+        over_basket_xy_broad_score = torch.exp(-(obj_to_site_xy_dist / basket_xy_broad_temperature).clamp(0.0, 50.0))
+        over_basket_xy_mid_score = torch.exp(-(obj_to_site_xy_dist / basket_xy_mid_temperature).clamp(0.0, 50.0))
+        over_basket_xy_fine_score = torch.exp(-(obj_to_site_xy_dist / basket_xy_fine_temperature).clamp(0.0, 50.0))
+        eef_to_basket_score = torch.exp(-(eef_to_site_xy_dist / eef_to_basket_temperature).clamp(0.0, 50.0))
+
+        over_basket_xy_score = (
+            0.25 * basket_linear_score
+            + 0.30 * over_basket_xy_broad_score
+            + 0.25 * over_basket_xy_mid_score
+            + 0.20 * over_basket_xy_fine_score
         )
 
+        unit_to_site = obj_to_site_xy / obj_to_site_xy_dist.unsqueeze(-1).clamp_min(eps)
+        velocity_toward_site = (rel_obj_site_vel[:, :2] * unit_to_site).sum(dim=-1)
+        velocity_toward_site_score = torch.sigmoid((velocity_toward_site / velocity_toward_site_temperature).clamp(-20.0, 20.0))
 
+        transport_target_z = basket_top_z + 0.055
+        transport_height_score = torch.exp(-(torch.abs(obj_z - transport_target_z) / transport_height_temperature).clamp(0.0, 50.0))
+        excessive_lift = torch.relu(obj_z - (basket_top_z + 0.16))
+        excessive_lift_penalty = 1.0 - torch.exp(-(excessive_lift / transport_height_temperature).clamp(0.0, 50.0))
 
-
-
-        success = self.inside_site & self.low_enough & self.high_enough_for_basket
-        success_reward = 16 * 40 * success
-
-        # Stage 4: inside site -> retract arm up and release gripper so object drops into basket
-        obj_z = self.target_object.data.root_pos_w[:, 2]
-        site_top_z = self.target_site_corners_world[1, 2]
-        # Linear descend shaping: higher reward when object z is lower (even from far away)
-        # Normalized so it's 0 at site_top_z and -1 at 0.3m above; never negative below site_top
-        obj_above_site = (obj_z - site_top_z).clamp(min=0.0)
-        descend_reward_stage4 = -obj_above_site / 0.3  # linear, 0 when at site_top, -1 when 30cm above
-
-        # Reward TCP (arm) moving upward to retract away so object can fall freely
-        tcp_z = self.robot_grasp_pos[:, 2]
-        tcp_above_obj = (tcp_z - obj_z).clamp(min=0.0)  # 0 if tcp below obj (unusual), positive if tcp above
-        retract_reward_stage4 = torch.exp(-tcp_above_obj / 0.1) - 1.0  # 0 when tcp is well above obj, -1 when tcp is at obj
-
-        release_error_stage4 = torch.abs(gripper_action - 1.0)  # +1 = open gripper
-        release_reward_stage4 = torch.exp(-release_error_stage4 / 0.5)
-
-        stage4_reward = stage4_bonus + stage4_mask * (
-            1.0 * descend_reward_stage4 +
-            0.5 * retract_reward_stage4 +
-            0.3 * release_reward_stage4
+        stage2_transport_hint_score = grasped_f * (
+            0.70 * lift_progress_score
+            + 0.20 * over_basket_xy_broad_score
+            + 0.10 * eef_to_basket_score
         )
 
-        pos_delta = torch.norm(self.prev_actions - self.actions, dim=-1)
-
-        reward = (stage0_reward +
-        stage1_reward +
-        stage2_reward +
-        stage3_reward +
-        stage4_reward +
-        success_reward -
-        pos_delta * 0.01
+        transport_progress_score = grasped_f * high_enough_f * (
+            0.10 * hold_score
+            + 0.15 * eef_to_basket_score
+            + 0.47 * over_basket_xy_score
+            + 0.18 * velocity_toward_site_score
+            + 0.10 * transport_height_score
         )
-        return reward, {
-            # "xy_err": xy_err,
-            # "z_err": z_err,
-            # "pos_error": pos_error,
-            # "angle_error": angle_error,
-            # "r_xy": r_xy,
-            # "r_z": r_z,
-            # "r_rot": r_rot,
-            # "pos_error_stage_1": pos_error_stage_1,
-            # "gripper_pos": self._robot.data.joint_pos[:,-1],
-            # "ascend_diff": ascend_diff,
-            # "xy_err_site" : xy_err_site,
-            # "open_reward": open_reward,
-            # "close_reward": close_reward,
-            # "gripper_reward": gripper_reward,
-            # "descend_reward": descend_reward,
-            # "close_condition": close_condition.float(),
-            # "ascend_reward": ascend_reward,
-            # "xy_reward": xy_reward,
-            # "stage0_mask": stage0_mask,
-            # "stage1_mask": stage1_mask,
-            # "stage2_mask": stage2_mask,
-            # "stage3_mask": stage3_mask,
-            # "stage4_mask": stage4_mask,
-            # "stage0_reward": stage0_reward,
-            # "stage1_reward": stage1_reward,
-            # "stage2_reward": stage2_reward,
-            # "stage3_reward": stage3_reward,
-            # "stage4_reward": stage4_reward,
-            # "descend_reward_stage4": descend_reward_stage4,
-            # "retract_reward_stage4": retract_reward_stage4,
-            # "release_reward_stage4": release_reward_stage4,
-            # "obj_above_site": obj_above_site,
-            # "tcp_above_obj": tcp_above_obj,
-            "success": success,
+
+        transport_far_penalty = grasped_f * high_enough_f * basket_dist_norm
+
+        # --------------------------------------------------------------------- #
+        # Stage 4: open gripper and let object enter basket volume
+        # --------------------------------------------------------------------- #
+        basket_z_temperature = 0.075
+        basket_mid_z_temperature = 0.15
+        below_top_temperature = 0.08
+        downward_velocity_temperature = 0.30
+
+        z_violation = torch.relu(obj_z - basket_top_z) + torch.relu(basket_bottom_z - obj_z)
+        basket_z_score = torch.exp(-(z_violation / basket_z_temperature).clamp(0.0, 50.0))
+        basket_mid_z_score = torch.exp(-(torch.abs(obj_z - basket_mid_z) / basket_mid_z_temperature).clamp(0.0, 50.0))
+        below_top_score = torch.sigmoid(((basket_top_z - obj_z) / below_top_temperature).clamp(-20.0, 20.0))
+        downward_velocity_score = torch.sigmoid((-obj_lin_vel[:, 2] / downward_velocity_temperature).clamp(-20.0, 20.0))
+        released_score = (1.0 - grasped_f).clamp(0.0, 1.0)
+
+        drop_progress_score = over_basket_xy_fine_score * (
+            0.22 * basket_z_score
+            + 0.10 * basket_mid_z_score
+            + 0.18 * below_top_score
+            + 0.27 * open_action_score
+            + 0.13 * released_score
+            + 0.10 * downward_velocity_score
+        )
+
+        premature_open_penalty = open_action_score * (1.0 - over_basket_xy_mid_score).clamp(0.0, 1.0) * (s2 + s3) * grasped_f
+        stage4_closed_penalty = s4 * close_action_score * grasped_f
+
+        # --------------------------------------------------------------------- #
+        # Stage-conditioned reward.
+        # Persistent grasp/lift rewards are deliberately small and not paid in
+        # Stage 3 unless transport is improving, to avoid lifted-object hovering.
+        # --------------------------------------------------------------------- #
+        stage_bonus = (
+            0.000 * s0
+            + 0.012 * s1
+            + 0.030 * s2
+            + 0.070 * s3
+            + 0.120 * s4
+        )
+
+        stage_progress_reward = (
+            s0 * 0.060 * pregrasp_score
+            + s1 * 0.180 * grasp_progress_score
+            + s2 * 0.175 * stage2_transport_hint_score
+            + s3 * (0.390 * transport_progress_score - 0.120 * transport_far_penalty + 0.035 * close_action_score)
+            + s4 * 0.420 * drop_progress_score
+        )
+
+        grasp_milestone_reward = 0.045 * grasped_f * (s1 + s2)
+        lift_milestone_reward = 0.035 * grasped_f * high_enough_f * s3
+        inside_xy_milestone_reward = 0.140 * inside_site.float() * grasped_f * high_enough_f
+        release_milestone_reward = 0.180 * inside_site.float() * released_score * high_enough_for_basket.float()
+
+        # --------------------------------------------------------------------- #
+        # Regularization
+        # --------------------------------------------------------------------- #
+        joint_pos = torch.nan_to_num(self._robot.data.joint_pos, nan=0.0, posinf=0.0, neginf=0.0)
+        joint_vel = torch.nan_to_num(self._robot.data.joint_vel, nan=0.0, posinf=0.0, neginf=0.0)
+
+        dof_lower = torch.nan_to_num(self.robot_dof_lower_limits, nan=0.0, posinf=0.0, neginf=0.0)
+        dof_upper = torch.nan_to_num(self.robot_dof_upper_limits, nan=0.0, posinf=0.0, neginf=0.0)
+        dof_range = torch.clamp(dof_upper - dof_lower, min=eps)
+
+        dof_pos_scaled = 2.0 * (joint_pos - dof_lower) / dof_range - 1.0
+        joint_limit_margin = torch.relu(torch.abs(dof_pos_scaled) - 0.82) / 0.18
+        joint_limit_penalty = joint_limit_margin.clamp(0.0, 1.0).mean(dim=-1)
+
+        action_rate_penalty = torch.square(actions - prev_actions).mean(dim=-1).clamp(0.0, 1.0)
+        joint_vel_penalty = (torch.square(joint_vel).mean(dim=-1) / 25.0).clamp(0.0, 1.0)
+        stage1_hover_penalty = s1 * too_high_penalty
+
+        time_penalty = torch.full((self.num_envs,), 0.004, device=self.device, dtype=dtype)
+
+        regularization_penalty = (
+            0.045 * joint_limit_penalty
+            + 0.008 * action_rate_penalty
+            + 0.003 * joint_vel_penalty
+            + 0.045 * far_close_penalty * (s0 + s1)
+            + 0.060 * stage1_hover_penalty
+            + 0.060 * s3 * excessive_lift_penalty
+            + 0.080 * premature_open_penalty
+            + 0.070 * stage4_closed_penalty
+            + time_penalty
+        )
+
+        non_success_reward = (
+            stage_bonus
+            + stage_progress_reward
+            + grasp_milestone_reward
+            + lift_milestone_reward
+            + inside_xy_milestone_reward
+            + release_milestone_reward
+            - regularization_penalty
+        )
+
+        # Keep non-success below 0.48 so terminal success at 5.0 is >10x better.
+        non_success_reward = torch.nan_to_num(non_success_reward, nan=-0.5, posinf=0.48, neginf=-1.0).clamp(-1.0, 0.48)
+        success_reward = torch.full((self.num_envs,), 5.0, device=self.device, dtype=dtype)
+
+        reward = torch.where(success, success_reward, non_success_reward)
+        reward = torch.nan_to_num(reward, nan=-1.0, posinf=5.0, neginf=-1.0).clamp(-5.0, 5.0)
+
+        individual_rewards_dict = {
+            "success": success_f,
+            "inside_site": inside_site.float(),
+            "low_enough": low_enough.float(),
+            "high_enough_for_basket": high_enough_for_basket.float(),
+            "stage_0_default": s0,
+            "stage_1_pregrasp": s1,
+            "stage_2_grasped": s2,
+            "stage_3_lifted": s3,
+            "stage_4_over_basket": s4,
+            "pregrasp_score": pregrasp_score,
+            "pregrasp_xy_score": pregrasp_xy_score,
+            "pregrasp_z_score": pregrasp_z_score,
+            "orientation_score": orientation_score,
+            "grasp_progress_score": grasp_progress_score,
+            "grasp_pose_score": grasp_pose_score,
+            "grasp_xy_score": grasp_xy_score,
+            "grasp_z_score": grasp_z_score,
+            "center_distance_score": center_distance_score,
+            "contact_zone_score": contact_zone_score,
+            "grasp_intent_score": grasp_intent_score,
+            "close_action_score": close_action_score,
+            "far_close_penalty": far_close_penalty,
+            "too_high_penalty": too_high_penalty,
+            "stable_grasp": grasped_f,
+            "hold_score": hold_score,
+            "lift_progress_score": lift_progress_score,
+            "lift_height_score": lift_height_score,
+            "above_rim_score": above_rim_score,
+            "high_enough": high_enough_f,
+            "stage2_transport_hint_score": stage2_transport_hint_score,
+            "transport_progress_score": transport_progress_score,
+            "over_basket_xy_score": over_basket_xy_score,
+            "basket_linear_score": basket_linear_score,
+            "basket_dist_norm": basket_dist_norm,
+            "over_basket_xy_broad_score": over_basket_xy_broad_score,
+            "over_basket_xy_mid_score": over_basket_xy_mid_score,
+            "over_basket_xy_fine_score": over_basket_xy_fine_score,
+            "eef_to_basket_score": eef_to_basket_score,
+            "velocity_toward_site_score": velocity_toward_site_score,
+            "transport_height_score": transport_height_score,
+            "transport_far_penalty": transport_far_penalty,
+            "excessive_lift_penalty": excessive_lift_penalty,
+            "drop_progress_score": drop_progress_score,
+            "basket_z_score": basket_z_score,
+            "basket_mid_z_score": basket_mid_z_score,
+            "below_top_score": below_top_score,
+            "open_action_score": open_action_score,
+            "released_score": released_score,
+            "downward_velocity_score": downward_velocity_score,
+            "premature_open_penalty": premature_open_penalty,
+            "stage4_closed_penalty": stage4_closed_penalty,
+            "stage_bonus": stage_bonus,
+            "stage_progress_reward": stage_progress_reward,
+            "grasp_milestone_reward": grasp_milestone_reward,
+            "lift_milestone_reward": lift_milestone_reward,
+            "inside_xy_milestone_reward": inside_xy_milestone_reward,
+            "release_milestone_reward": release_milestone_reward,
+            "joint_limit_penalty": joint_limit_penalty,
+            "action_rate_penalty": action_rate_penalty,
+            "joint_vel_penalty": joint_vel_penalty,
+            "stage1_hover_penalty": stage1_hover_penalty,
+            "regularization_penalty": regularization_penalty,
+            "non_success_reward": non_success_reward,
         }
 
+        for key, value in individual_rewards_dict.items():
+            individual_rewards_dict[key] = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+
+        assert torch.isfinite(reward).all(), "Non-finite reward detected in _get_rewards_eureka"
+        return reward, individual_rewards_dict

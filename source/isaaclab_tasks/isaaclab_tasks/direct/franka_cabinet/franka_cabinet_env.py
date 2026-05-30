@@ -310,29 +310,32 @@ class FrankaCabinetEnv(DirectRLEnv):
         self._compute_intermediate_values()
         robot_left_finger_pos = self._robot.data.body_pos_w[:, self.left_finger_link_idx]
         robot_right_finger_pos = self._robot.data.body_pos_w[:, self.right_finger_link_idx]
+        rewards, individual_rewards = self._get_rewards_test()
 
+        self.extras["log"] = individual_rewards
+        return rewards
 
-        return self._compute_rewards(
-            self.actions,
-            self._cabinet.data.joint_pos,
-            self.robot_grasp_pos,
-            self.drawer_grasp_pos,
-            self.robot_grasp_rot,
-            self.drawer_grasp_rot,
-            robot_left_finger_pos,
-            robot_right_finger_pos,
-            self.gripper_forward_axis,
-            self.drawer_inward_axis,
-            self.gripper_up_axis,
-            self.drawer_up_axis,
-            self.num_envs,
-            self.cfg.dist_reward_scale,
-            self.cfg.rot_reward_scale,
-            self.cfg.open_reward_scale,
-            self.cfg.action_penalty_scale,
-            self.cfg.finger_reward_scale,
-            self._robot.data.joint_pos,
-        )
+        # return self._compute_rewards(
+        #     self.actions,
+        #     self._cabinet.data.joint_pos,
+        #     self.robot_grasp_pos,
+        #     self.drawer_grasp_pos,
+        #     self.robot_grasp_rot,
+        #     self.drawer_grasp_rot,
+        #     robot_left_finger_pos,
+        #     robot_right_finger_pos,
+        #     self.gripper_forward_axis,
+        #     self.drawer_inward_axis,
+        #     self.gripper_up_axis,
+        #     self.drawer_up_axis,
+        #     self.num_envs,
+        #     self.cfg.dist_reward_scale,
+        #     self.cfg.rot_reward_scale,
+        #     self.cfg.open_reward_scale,
+        #     self.cfg.action_penalty_scale,
+        #     self.cfg.finger_reward_scale,
+        #     self._robot.data.joint_pos,
+        # )
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         super()._reset_idx(env_ids)
@@ -526,3 +529,101 @@ class FrankaCabinetEnv(DirectRLEnv):
 
     def run_replay(self, log_dir:str, render:bool=False):
         pass
+
+
+    def _get_rewards_test(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        import torch
+
+        device = self.device
+        envs = self.num_envs
+
+        # --- State (sanitize for numerical safety) ---
+        # Distance from gripper grasp frame to drawer grasp target
+        to_target = torch.nan_to_num(self.drawer_grasp_pos - self.robot_grasp_pos, nan=0.0, posinf=0.0, neginf=0.0)
+        dist = torch.linalg.norm(to_target, dim=-1)
+        dist = torch.nan_to_num(dist, nan=1e6, posinf=1e6, neginf=1e6)
+
+        # Drawer joint (use the same joint as used in observations)
+        drawer_q = self._cabinet.data.joint_pos[:, self.drawer_joint_idx]
+        drawer_q = torch.nan_to_num(drawer_q, nan=0.0, posinf=0.0, neginf=0.0)
+
+        drawer_qd = self._cabinet.data.joint_vel[:, self.drawer_joint_idx]
+        drawer_qd = torch.nan_to_num(drawer_qd, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Robot joint velocity penalty (encourage smooth motion)
+        qd = torch.nan_to_num(self._robot.data.joint_vel, nan=0.0, posinf=0.0, neginf=0.0)
+        qd_norm = torch.linalg.norm(qd, dim=-1)
+        qd_norm = torch.nan_to_num(qd_norm, nan=0.0, posinf=1e3, neginf=0.0)
+
+        # --- Shaping components ---
+        # 1) Reach the handle/target grasp point
+        temp_reach = 0.08  # meters
+        r_reach = torch.exp(-dist / temp_reach)
+
+        # 2) Progress: open the drawer (normalized 0..1 around success threshold)
+        # Success metric indicates success when drawer joint pos > 0.39
+        success_thresh = 0.39
+        # Map to [0, 1] over a small band after threshold for stable gradients
+        open_band = 0.08
+        open_prog = torch.clamp((drawer_q - (success_thresh - 0.02)) / (open_band + 1e-6), 0.0, 1.0)
+
+        # 3) Encourage opening more once near the handle (gate by reach)
+        temp_open = 0.25
+        r_open = torch.exp(-(1.0 - open_prog) / temp_open)
+
+        # 4) Reward drawer opening velocity only when near the handle (avoid flailing)
+        # Only reward positive velocity (opening direction)
+        open_vel = torch.clamp(drawer_qd, min=0.0)
+        temp_vel = 0.20
+        r_open_vel = 1.0 - torch.exp(-open_vel / temp_vel)
+
+        # 5) Action/velocity regularization (use joint velocity norm as proxy)
+        temp_smooth = 6.0
+        r_smooth = torch.exp(-qd_norm / temp_smooth)
+
+        # 6) Sparse success bonus (helps reach desired score)
+        success = (drawer_q > success_thresh).to(drawer_q.dtype)
+
+        # --- Combine (weights tuned to prioritize task completion) ---
+        # Gate opening rewards by proximity so agent learns to reach before pulling.
+        reach_gate = torch.clamp(r_reach * 1.2, 0.0, 1.0)
+
+        w_reach = 0.35
+        w_open = 0.55
+        w_open_vel = 0.15
+        w_smooth = 0.08
+        w_success = 1.5
+
+        reward = (
+            w_reach * r_reach
+            + w_open * (reach_gate * r_open)
+            + w_open_vel * (reach_gate * r_open_vel)
+            + w_smooth * r_smooth
+            + w_success * success
+        )
+
+        # Mild penalty if very far from target to reduce wandering
+        far_penalty = torch.clamp((dist - 0.25) / 0.25, min=0.0, max=1.0)
+        reward = reward - 0.10 * far_penalty
+
+        # Final sanitize
+        reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
+        reward = torch.clamp(reward, -2.0, 3.0)
+
+        # Ensure correct shape
+        if reward.shape != (envs,):
+            reward = reward.view(envs)
+
+        # Assert finite for training stability
+        assert torch.isfinite(reward).all()
+
+        individual_rewards = {
+            "reach": r_reach,
+            "open_prog": open_prog,
+            "open_shaped": reach_gate * r_open,
+            "open_vel": reach_gate * r_open_vel,
+            "smooth": r_smooth,
+            "success_bonus": success,
+            "far_penalty": far_penalty,
+        }
+        return reward, individual_rewards
