@@ -33,7 +33,7 @@ parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments (camera attaches to env 0).")
-parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument("--task", type=str, default="TestPickItUp", help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
@@ -46,7 +46,7 @@ parser.add_argument(
 parser.add_argument(
     "--output_dir",
     type=str,
-    default=None,
+    default="/home/shaotongchen/workspace_eureka/IsaacLabEureka/vlm_comparision/pictures/1",
     help="Directory to write RGB frames into. Defaults to <log_dir>/vlm_frames/<timestamp>.",
 )
 parser.add_argument(

@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Like run_singularity.sh but also binds IsaacLabEureka and installs it before running.
-# Usage: same as run_singularity.sh — called by submit_job_slurm.sh
+# Called on compute node by submit_job_slurm_eureka.sh
+# $1 = path to timestamped IsaacLabEureka dir on cluster shared fs
+# $2 = container profile name (e.g. isaac-lab-base)
+# $3+ = args forwarded to python script
 
-echo "(run_singularity_eureka.sh): Called on compute node. IsaacLab=$1  profile=$2  args=${@:3}"
-
-#==
-# Helper functions
-#==
+echo "(run_singularity_eureka.sh): eureka=$1  profile=$2  args=${@:3}"
 
 setup_directories() {
     for dir in \
@@ -18,37 +16,34 @@ setup_directories() {
         "${CLUSTER_ISAAC_SIM_CACHE_DIR}/logs" \
         "${CLUSTER_ISAAC_SIM_CACHE_DIR}/data" \
         "${CLUSTER_ISAAC_SIM_CACHE_DIR}/documents"; do
-        if [ ! -d "$dir" ]; then
-            mkdir -p "$dir"
-            echo "Created directory: $dir"
-        fi
+        [ ! -d "$dir" ] && mkdir -p "$dir" && echo "Created: $dir"
     done
 }
-
-#==
-# Main
-#==
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 
 source $SCRIPT_DIR/.env.cluster.bsc
 source $SCRIPT_DIR/../.env.base
 
+module load singularity
+
 setup_directories
 cp -r $CLUSTER_ISAAC_SIM_CACHE_DIR $TMPDIR
 
-mkdir -p "$CLUSTER_ISAACLAB_DIR/logs"
-touch "$CLUSTER_ISAACLAB_DIR/logs/.keep"
+# Permanent logs dir
+mkdir -p "$CLUSTER_EUREKA_DIR/logs"
 
-# Copy IsaacLab to compute node
-cp -r $1 $TMPDIR
-dir_name=$(basename "$1")
+# Copy full IsaacLabEureka tree to compute node local storage
+cp -r $1 $TMPDIR/isaaclab_eureka
 
-# Copy IsaacLabEureka source to compute node
-cp -r $CLUSTER_EUREKA_DIR/source/isaaclab_eureka $TMPDIR/isaaclab_eureka
+# Load secrets (gitignored, rsynced from local machine)
+if [ -f "$TMPDIR/isaaclab_eureka/.env.secret" ]; then
+    source $TMPDIR/isaaclab_eureka/.env.secret
+fi
 
-# Unpack container
+# Unpack container and create missing bind destinations
 tar -xf $CLUSTER_SIF_PATH/$2.tar -C $TMPDIR
+mkdir -p $TMPDIR/$2.sif/workspace/isaaclab_eureka
 
 singularity exec \
     -B $TMPDIR/docker-isaac-sim/cache/kit:${DOCKER_ISAACSIM_ROOT_PATH}/kit/cache:rw \
@@ -59,14 +54,12 @@ singularity exec \
     -B $TMPDIR/docker-isaac-sim/logs:${DOCKER_USER_HOME}/.nvidia-omniverse/logs:rw \
     -B $TMPDIR/docker-isaac-sim/data:${DOCKER_USER_HOME}/.local/share/ov/data:rw \
     -B $TMPDIR/docker-isaac-sim/documents:${DOCKER_USER_HOME}/Documents:rw \
-    -B $TMPDIR/$dir_name:/workspace/isaaclab:rw \
-    -B $CLUSTER_ISAACLAB_DIR/logs:/workspace/isaaclab/logs:rw \
     -B $TMPDIR/isaaclab_eureka:/workspace/isaaclab_eureka:rw \
+    -B $CLUSTER_EUREKA_DIR/logs:/workspace/isaaclab_eureka/logs:rw \
+    --env OPENAI_API_KEY=$OPENAI_API_KEY \
     --nv --writable --containall $TMPDIR/$2.sif \
     bash -c "
-        export ISAACLAB_PATH=/workspace/isaaclab
-        cd /workspace/isaaclab
-        /isaac-sim/python.sh -m pip install -e /workspace/isaaclab_eureka --quiet
+        /isaac-sim/python.sh -m pip install -e /workspace/isaaclab_eureka/source/isaaclab_eureka --no-deps --no-build-isolation --quiet
         /isaac-sim/python.sh ${CLUSTER_PYTHON_EXECUTABLE} ${@:3}
     "
 
@@ -76,4 +69,4 @@ if $REMOVE_CODE_COPY_AFTER_JOB; then
     rm -rf $1
 fi
 
-echo "(run_singularity_eureka.sh): Return"
+echo "(run_singularity_eureka.sh): Done"

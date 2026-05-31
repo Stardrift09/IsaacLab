@@ -2,17 +2,17 @@
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Place-basket-in-open-drawer task.
+"""Place-target-object-in-open-drawer task.
 
 Scene
 -----
-* Franka Panda at local (0.4, 0, 0)
-* Sektion cabinet at local (0.8, 0, 0.4) with TOP drawer pre-opened (0.39 m)
-* Basket rigid object – initially on the table, position randomised each episode
+* Franka Panda at local (1.0, 0, 0)
+* Sektion cabinet at local (-0.2, 0, 0.4) with the bottom drawer pre-opened (0.39 m)
+* Target object (cream_cheese) — initially on the table, position randomised each episode
 
 Goal
 ----
-Pick up the basket and place it inside the open top drawer.
+Pick up the target object and place it inside the open bottom drawer.
 
 Inheritance
 -----------
@@ -59,7 +59,7 @@ from .test_pick_it_up import TestPickItUp, TestPickItUpCfg
 
 @configclass
 class TestPlaceCreamCheeseInDrawerCfg(TestPickItUpCfg):
-    """Configuration for the place-basket-in-drawer task."""
+    """Configuration for the place-target-object-in-drawer task."""
 
     episode_length_s: float = 12.0
     observation_space: int = 71   # matches actual obs vector (see _get_observations)
@@ -75,7 +75,7 @@ class TestPlaceCreamCheeseInDrawerCfg(TestPickItUpCfg):
     cream_cheese  = None   # re-spawned in _setup_scene with the correct USD path
     alphabet_soup = None
     tomato_sauce  = None
-    basket        = None
+    basket        = None   # parent attr name; no basket in this task
 
     # Cabinet – same position as franka_cabinet_env.py (robot at 1.0, cabinet at 0.0 → 1 m gap)
     cabinet_pos: tuple = (-0.2, 0.0, 0.4)
@@ -95,7 +95,7 @@ class TestPlaceCreamCheeseInDrawerCfg(TestPickItUpCfg):
 
 class TestPlaceCreamCheeseInDrawer(TestPickItUp):
     """
-    Pick up the basket and place it inside the pre-opened top drawer.
+    Pick up the target object and place it inside the pre-opened bottom drawer.
 
     Inherits grasp detection, action application, markers, and helper
     computation from TestPickItUp.  Demo-trajectory loading is bypassed
@@ -160,7 +160,7 @@ class TestPlaceCreamCheeseInDrawer(TestPickItUp):
 
         # Drawer interior half-sizes (Sektion cabinet top drawer, approximate).
         # X = depth direction (drawer pulls out in +X), Y = width, Z = height.
-        # Tune if basket success detection is off.
+        # Tune if target-object success detection is off.
         self.drawer_half_x = 0.18   # depth half
         self.drawer_half_y = 0.17   # width half
         self.drawer_half_z = 0.06   # height half
@@ -170,7 +170,7 @@ class TestPlaceCreamCheeseInDrawer(TestPickItUp):
         self.drawer_interior_local = torch.tensor([-0.05, 0.0, 0.0], device=self.device)
 
         # ------------------------------------------------------------------
-        # Basket bounding-box (computed once from env_0)
+        # Target-object bounding-box (computed once from env_0)
         # ------------------------------------------------------------------
         stage = get_current_stage()
         prim = stage.GetPrimAtPath(f"/World/envs/env_0/{self.target_object_name}/object")
@@ -251,7 +251,7 @@ class TestPlaceCreamCheeseInDrawer(TestPickItUp):
         self.low_enough           = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self.inside_site          = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self.grasped_and_lifted   = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
-        self.high_enough_for_basket = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self.high_enough_for_target = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
 
         # Tracked drawer position (world frame)
         self.drawer_interior_pos_w = torch.zeros((self.num_envs, 3), device=self.device)
@@ -267,7 +267,7 @@ class TestPlaceCreamCheeseInDrawer(TestPickItUp):
     # ------------------------------------------------------------------
 
     def _setup_scene(self):
-        """Spawn robot, basket, cabinet with top drawer held open."""
+        """Spawn robot, target object, cabinet with bottom drawer held open."""
 
         # --- Robot ---
         robot_cfg = ArticulationCfg(
@@ -423,7 +423,7 @@ class TestPlaceCreamCheeseInDrawer(TestPickItUp):
         if env_ids is None:
             env_ids = self._robot._ALL_INDICES
         self._compute_robot_intermediate_values(env_ids)
-        self._compute_target_object_corners(env_ids)   # basket corners
+        self._compute_target_object_corners(env_ids)   # target object corners
         self._compute_drawer_interior(env_ids)          # drawer world position
 
     def _compute_drawer_interior(self, env_ids=None):
@@ -447,20 +447,23 @@ class TestPlaceCreamCheeseInDrawer(TestPickItUp):
         self.grasped = self._grasp_detection()
         self._update_past_relative_dist()
 
-        basket_pos = self.target_object.data.root_pos_w   # (N,3)
+        obj_pos    = self.target_object.data.root_pos_w   # (N,3)
         drawer_pos = self.drawer_interior_pos_w            # (N,3)
 
-        # Inside drawer volume (axis-aligned box around interior centre)
-        diff = basket_pos - drawer_pos
-        inside_x = diff[:, 0].abs() < self.drawer_half_x
-        inside_y = diff[:, 1].abs() < self.drawer_half_y
-        inside_z = diff[:, 2].abs() < (self.drawer_half_z + 0.04)   # extra tolerance in Z
+        # Inside drawer volume: AABB-style check with a 1 cm margin shrunk
+        # inward from every drawer wall. Asymmetric Z lower bound (-1 cm)
+        # prevents reward-hacking from clipping under the drawer floor.
+        margin   = 0.01
+        diff     = obj_pos - drawer_pos
+        inside_x = diff[:, 0].abs() < (self.drawer_half_x - margin)
+        inside_y = diff[:, 1].abs() < (self.drawer_half_y - margin)
+        inside_z = (diff[:, 2] > -margin) & (diff[:, 2] < (self.drawer_half_z - margin))
 
-        self.inside_site          = inside_x & inside_y & inside_z
-        self.low_enough           = basket_pos[:, 2] < (drawer_pos[:, 2] + self.drawer_half_z)
-        self.high_enough_for_basket = basket_pos[:, 2] > (drawer_pos[:, 2] - self.drawer_half_z - 0.04)
-        # "high enough" = basket lifted above the drawer opening plane (for transport)
-        self.high_enough = basket_pos[:, 2] > drawer_pos[:, 2]
+        self.inside_site            = inside_x & inside_y & inside_z
+        self.low_enough             = obj_pos[:, 2] < (drawer_pos[:, 2] + self.drawer_half_z)
+        self.high_enough_for_target = obj_pos[:, 2] > (drawer_pos[:, 2] - 0.01)
+        # "high enough" = target lifted above the drawer opening plane (for transport)
+        self.high_enough = obj_pos[:, 2] > drawer_pos[:, 2]
 
         self.grasped_and_lifted |= self.grasped & self.high_enough
         terminated = self.inside_site & self.grasped_and_lifted
@@ -609,12 +612,12 @@ class TestPlaceCreamCheeseInDrawer(TestPickItUp):
         obj_to_drw_dist   = torch.linalg.norm(obj_pos - drawer_pos, dim=-1)
         obj_to_drw_xy     = torch.linalg.norm(obj_xy - drw_xy, dim=-1)
 
-        # -- Stage 0: approach basket from above --
+        # -- Stage 0: approach target object from above --
         approach_xy = torch.exp(-(eef_to_obj_xy / 0.12).clamp(0, 50))
         approach_z  = torch.exp(-(torch.abs(eef_pos[:, 2] - (obj_z + 0.08)) / 0.08).clamp(0, 50))
         approach    = 0.6 * approach_xy + 0.4 * approach_z
 
-        # -- Stage 1: grasp basket --
+        # -- Stage 1: grasp target object --
         grasp_xy    = torch.exp(-(eef_to_obj_xy / 0.05).clamp(0, 50))
         grasp_z     = torch.exp(-(torch.abs(eef_pos[:, 2] - obj_z) / 0.04).clamp(0, 50))
         grasp_prog  = 0.50 * grasp_xy + 0.30 * grasp_z + 0.20 * close_score

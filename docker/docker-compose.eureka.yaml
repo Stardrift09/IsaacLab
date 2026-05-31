@@ -1,9 +1,10 @@
 # Eureka overlay — pass with: python container.py start base --files docker-compose.eureka.yaml
-# Mounts IsaacLabEureka/source/isaaclab_eureka into the container without rebuilding the image.
+# Mounts full IsaacLabEureka root into the container without rebuilding the image.
+# IsaacLabEureka/IsaacLab lands at /workspace/isaaclab_eureka/IsaacLab — no conflict with /workspace/isaaclab.
 
 services:
   isaac-lab-base:
     volumes:
       - type: bind
-        source: ../../source/isaaclab_eureka
+        source: ../../
         target: /workspace/isaaclab_eureka

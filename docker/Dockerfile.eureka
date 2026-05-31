@@ -1,0 +1,17 @@
+FROM isaac-lab-base:latest
+
+# Accept EULA and disable build isolation for isaaclab's setup.py
+ENV ACCEPT_EULA=Y
+ENV PIP_NO_BUILD_ISOLATION=1
+
+# Install core isaaclab package — toml must come first (setup.py imports it)
+RUN /isaac-sim/kit/python/bin/python3 -m pip install toml && \
+    /isaac-sim/kit/python/bin/python3 -m pip install \
+        --no-build-isolation -e /workspace/isaaclab/source/isaaclab
+
+# Pre-install isaaclab_eureka deps and extras (internet required — done at build time)
+RUN /isaac-sim/kit/python/bin/python3 -m pip install \
+    --no-build-isolation openai gputil matplotlib qwen_vl_utils
+
+# Create bind mount destination so Singularity doesn't fail
+RUN mkdir -p /workspace/isaaclab_eureka
