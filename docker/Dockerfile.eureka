@@ -4,6 +4,27 @@ FROM isaac-lab-base:latest
 ENV ACCEPT_EULA=Y
 ENV PIP_NO_BUILD_ISOLATION=1
 
+# CUDA Forward Compatibility: BSC MN5 nodes run driver 535 (max CUDA 12.2), but we
+# need a higher CUDA driver API. We isolate ONLY libcuda.so.1 from driver 575 into
+# /usr/local/cuda-compat/. With it the driver reports CUDA 12.9 (verified via the
+# "found version 12090" runtime check), enough for a cu126 torch build (see below).
+# Other libs (libnvidia-ml.so.1 etc.) must NOT be overridden — they are injected at
+# runtime by --nv and must match the host driver (535), else NVML version mismatch.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends wget && \
+    wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb && \
+    dpkg -i /tmp/cuda-keyring.deb && \
+    rm /tmp/cuda-keyring.deb && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends libnvidia-compute-575 && \
+    mkdir -p /usr/local/cuda-compat && \
+    cp /usr/lib/x86_64-linux-gnu/libcuda.so.575.57.08 /usr/local/cuda-compat/ && \
+    ln -s libcuda.so.575.57.08 /usr/local/cuda-compat/libcuda.so.1 && \
+    ln -s libcuda.so.575.57.08 /usr/local/cuda-compat/libcuda.so && \
+    apt-get remove -y libnvidia-compute-575 libnvidia-decode-575 && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install core isaaclab package — toml must come first (setup.py imports it)
 RUN /isaac-sim/kit/python/bin/python3 -m pip install toml && \
     /isaac-sim/kit/python/bin/python3 -m pip install \

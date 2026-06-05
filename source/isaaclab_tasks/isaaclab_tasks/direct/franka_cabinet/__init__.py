@@ -18,6 +18,9 @@ task_dict = { # Using the same config, manually set
     "OpenDrawerAndPutCreamCheese": "open_drawer_and_put_cream_cheese",
     "TestStageAsFeedback": "test_stage_as_feedback",
     "TestPickItUp": "test_pick_it_up",
+    "TestPickItUpKetchup": "test_pick_it_up",
+    "TestPickItUpCreamCheese": "test_pick_it_up",
+    "TestPickItUpTomatoSauce": "test_pick_it_up",
     "TestCollideAndPlace": "test_collide_and_place",
     "TestSlightCollideAndPlace": "test_collide_and_place",
     "TestSlightCollide": "test_collide_and_place",
@@ -85,6 +88,19 @@ gym.register(
         "env_cfg_entry_point": f"{__name__}.test_put_it_in_the_basket:TestPutItInTheBasketCfg",
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:TestPutItInTheBasketPPORunnerCfg",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+    },
+)
+
+
+gym.register(
+    id="ReplayPickItUpOneEnv",
+    entry_point=f"{__name__}.replay_pick_it_up_one_env:ReplayPickItUpOneEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.replay_pick_it_up_one_env:ReplayPickItUpOneEnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:FrankaTestPPORunnerCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
     },
 )

@@ -217,6 +217,21 @@ class TestPickItUpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     )
 
 @configclass
+class TestPickItUpKetchupPPORunnerCfg(TestPickItUpPPORunnerCfg):
+    experiment_name = "test_pick_it_up_ketchup"
+
+
+@configclass
+class TestPickItUpCreamCheesePPORunnerCfg(TestPickItUpPPORunnerCfg):
+    experiment_name = "test_pick_it_up_cream_cheese"
+
+
+@configclass
+class TestPickItUpTomatoSaucePPORunnerCfg(TestPickItUpPPORunnerCfg):
+    experiment_name = "test_pick_it_up_tomato_sauce"
+
+
+@configclass
 class TestStageAsFeedbackPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 16
     max_iterations = 1500

@@ -16,7 +16,7 @@ cat <<EOT > job_eureka.sh
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=20
 #SBATCH --gres=gpu:1
-#SBATCH --time=1:00:00
+#SBATCH --time=20:00:00
 #SBATCH --mail-type=END
 #SBATCH --mail-user=dunkakaslana@gmail.com
 #SBATCH --job-name="eureka-$(date +"%Y-%m-%dT%H:%M")"

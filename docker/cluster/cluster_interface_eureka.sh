@@ -85,6 +85,9 @@ case $command in
         check_docker_version
         echo "[INFO] Building isaac-lab-$profile image from Dockerfile.eureka..."
         docker build -f "$SCRIPT_DIR/../Dockerfile.eureka" -t "isaac-lab-$profile:latest" "$EUREKA_ROOT"
+        # BSC overlay: layer the cu126 torch downgrade on top, retag as the shipped image.
+        echo "[INFO] Applying BSC overlay from Dockerfile.eureka.bsc..."
+        docker build -f "$SCRIPT_DIR/../Dockerfile.eureka.bsc" -t "isaac-lab-$profile:latest" "$EUREKA_ROOT"
         mkdir -p $SCRIPT_DIR/exports
         rm -rf $SCRIPT_DIR/exports/isaac-lab-$profile*
         cd $SCRIPT_DIR/exports
@@ -123,6 +126,8 @@ case $command in
             --exclude="logs_history/" \
             --exclude=".cache/" \
             --exclude="vlm_comparision/" \
+            --filter="+ /libero/***" \
+            --filter="+ /offline_assets/***" \
             --filter="dir-merge,- .gitignore" \
             "$EUREKA_ROOT/" $CLUSTER_LOGIN:$CLUSTER_EUREKA_TS_DIR
 

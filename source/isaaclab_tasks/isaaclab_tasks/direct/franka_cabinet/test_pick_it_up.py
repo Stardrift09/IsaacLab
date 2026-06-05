@@ -24,7 +24,7 @@ from isaaclab.utils.math import sample_uniform, quat_inv, quat_mul, transform_po
 from torch.utils.tensorboard import SummaryWriter
 from isaaclab.sensors.camera import Camera, CameraCfg
 from isaaclab.sensors.contact_sensor.contact_sensor import ContactSensor
-from isaaclab.sensors import ContactSensorCfg
+from isaaclab.sensors import ContactSensorCfg, TiledCamera, TiledCameraCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 
 import pdb
@@ -141,7 +141,7 @@ class TestPickItUpCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/ketchup",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0.3, 0, 0], rot=[0.7071, 0.7071, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/ketchup/usd/ketchup.usd",
+            usd_path=f"{eureka_root_dir()}/libero/COMMON/stable_hope_objects/ketchup/usd/ketchup.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
@@ -153,7 +153,7 @@ class TestPickItUpCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/basket",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0, 0, 0], rot=[0, 0, 0, 1]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/basket/usd/basket.usd",
+            usd_path=f"{eureka_root_dir()}/libero/COMMON/stable_hope_objects/basket/usd/basket.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
@@ -165,7 +165,7 @@ class TestPickItUpCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/alphabet_soup",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0.2, 0.3, 0], rot=[0.7071, 0.7071, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/alphabet_soup/usd/alphabet_soup.usd",
+            usd_path=f"{eureka_root_dir()}/libero/COMMON/stable_hope_objects/alphabet_soup/usd/alphabet_soup.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
@@ -177,7 +177,7 @@ class TestPickItUpCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/cream_cheese",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0, 0.5, 0], rot=[0.7071, 0.7071, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/cream_cheese/usd/cream_cheese.usd",
+            usd_path=f"{eureka_root_dir()}/libero/COMMON/stable_hope_objects/cream_cheese/usd/cream_cheese.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
@@ -189,7 +189,7 @@ class TestPickItUpCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/tomato_sauce",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0.2, 0.5, 0], rot=[0.7071, 0.7071, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"/home/admin_01/workspace_eureka/IsaacLabEureka/libero/COMMON/stable_hope_objects/tomato_sauce/usd/tomato_sauce.usd",
+            usd_path=f"{eureka_root_dir()}/libero/COMMON/stable_hope_objects/tomato_sauce/usd/tomato_sauce.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 articulation_enabled=False
@@ -220,6 +220,10 @@ class TestPickItUp(DirectRLEnv):
 
     cfg: TestPickItUpCfg
 
+    # Target object to pick up. Subclasses override this class attribute to retarget the
+    # same task to a different object (see TestPickItUpKetchup / CreamCheese / TomatoSauce below).
+    target_object_name: str = "alphabet_soup"
+
     def __init__(self, cfg: TestPickItUpCfg, render_mode: str | None = None, **kwargs):
         seed = cfg.seed
         torch.manual_seed(seed)
@@ -238,7 +242,8 @@ class TestPickItUp(DirectRLEnv):
         self.start_in_air = cfg.start_in_air
         self.randomize_init = cfg.randomize_init
         self.root = eureka_root_dir()
-        self.target_object_name = "alphabet_soup"
+        # self.target_object_name resolves from the class attribute (default "alphabet_soup",
+        # overridden by subclasses) so the same env logic can retarget different objects.
         self.target_site_name = "basket"
         self.input_direction = 2 # z axis
         if self.input_direction != 2:
@@ -2288,3 +2293,39 @@ class TestPickItUp(DirectRLEnv):
 
         assert torch.isfinite(reward).all(), "Non-finite reward detected in _get_rewards_eureka"
         return reward, individual_rewards_dict
+
+
+# ---------------------------------------------------------------------------
+# Object-specific variants of TestPickItUp.
+# Each subclass only swaps the target object (everything else is inherited).
+# ---------------------------------------------------------------------------
+
+
+@configclass
+class TestPickItUpKetchupCfg(TestPickItUpCfg):
+    pass
+
+
+class TestPickItUpKetchup(TestPickItUp):
+    cfg: TestPickItUpKetchupCfg
+    target_object_name: str = "ketchup"
+
+
+@configclass
+class TestPickItUpCreamCheeseCfg(TestPickItUpCfg):
+    pass
+
+
+class TestPickItUpCreamCheese(TestPickItUp):
+    cfg: TestPickItUpCreamCheeseCfg
+    target_object_name: str = "cream_cheese"
+
+
+@configclass
+class TestPickItUpTomatoSauceCfg(TestPickItUpCfg):
+    pass
+
+
+class TestPickItUpTomatoSauce(TestPickItUp):
+    cfg: TestPickItUpTomatoSauceCfg
+    target_object_name: str = "tomato_sauce"

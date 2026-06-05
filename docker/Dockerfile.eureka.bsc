@@ -1,0 +1,22 @@
+# BSC overlay on top of the standard eureka image.
+# Built as a thin layer so the heavy base (isaac-lab-eureka) stays stable and only
+# the BSC-specific CUDA workaround lives here.
+#
+# Problem: BSC MN5 nodes run NVIDIA driver 535 (max CUDA 12.2). Two issues:
+#   1. The kit site-packages torch is 2.12.0+cu130 (needs driver CUDA 13.0).
+#   2. Isaac Sim 5.1 ALSO bundles its own torch at
+#      /isaac-sim/exts/omni.isaac.ml_archive/pip_prebundle/torch == 2.7.0+cu128.
+# When torch.compile/inductor crosses the two copies, the 2.12 site-packages torch
+# is missing symbols the 2.7 prebundle expects (e.g. CacheArtifactType in
+# torch.compiler._cache), so RL training dies with an ImportError.
+#
+# Fix: reinstall site-packages torch as 2.7.0+cu128 — the SAME version Isaac Sim
+# bundles and is built against. This removes the cross-version mismatch entirely.
+# cu128 needs the driver to report CUDA >=12.8; the 575 compat libcuda.so.1 baked
+# into the base image reports 12.9 (verified at runtime), which satisfies it.
+FROM isaac-lab-eureka:latest
+
+ENV ACCEPT_EULA=Y
+
+RUN /isaac-sim/kit/python/bin/python3 -m pip install --no-cache-dir \
+    torch==2.7.0+cu128 --index-url https://download.pytorch.org/whl/cu128
